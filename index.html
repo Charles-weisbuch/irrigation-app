@@ -178,6 +178,24 @@
   }
   .field.volume label{ color: var(--water); }
 
+  .mm-info{
+    background: #F1F7F8;
+    border: 1px dashed #BFDDE3;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--water);
+    margin: -6px 0 16px 0;
+  }
+  .mm-info .mm-sub{
+    display:block;
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--ink-soft);
+    margin-top: 2px;
+  }
+
   .save-btn{
     width:100%;
     background: var(--green-deep);
@@ -260,29 +278,28 @@
 // Colle ici l'URL de ton déploiement Google Apps Script (voir instructions).
 // Exemple : "https://script.google.com/macros/s/AKfycb.../exec"
 const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbywGvDi2NnqFXWTDpb4n6NhyRmDwKV7Nj7s2PmvS2CTNVR3OjfPpvA-xP59LP0TwqFztA/exec";
-
 // Structure réelle du classeur : chaque onglet a 2 ou 3 lignes d'irrigation.
 // "ligne" = numéro du bloc de colonnes dans l'onglet (1, 2 ou 3) — utilisé par le script Apps Script
 // pour retrouver automatiquement les bonnes colonnes, quel que soit le libellé affiché ici.
 const TABS = [
   { label: "La Fontaine", lignes: [
-      { ligne: 1, label: "Ligne 1" },
-      { ligne: 2, label: "Ligne 2" },
-      { ligne: 3, label: "Ligne 3" }
+      { ligne: 1, label: "Ligne 1", surface: 1.72 },
+      { ligne: 2, label: "Ligne 2", surface: 1.69 },
+      { ligne: 3, label: "Ligne 3", surface: 0.51 }
   ]},
   { label: "La Baume", lignes: [
-      { ligne: 1, label: "Ligne 1", caption: "Grande parcelle" },
-      { ligne: 2, label: "Ligne 2", caption: "Sud" },
-      { ligne: 3, label: "Ligne 3", caption: "Petite parcelle (bas)" }
+      { ligne: 1, label: "Ligne 1", caption: "Grande parcelle", surface: 0.7 },
+      { ligne: 2, label: "Ligne 2", caption: "Sud", surface: 0.7 },
+      { ligne: 3, label: "Ligne 3", caption: "Petite parcelle (bas)", surface: 0.1 }
   ]},
   { label: "Pilles", lignes: [
-      { ligne: 1, label: "Ligne 1" },
-      { ligne: 2, label: "Ligne 2" },
-      { ligne: 3, label: "Ligne 3" }
+      { ligne: 1, label: "Ligne 1", surface: 1.7 },
+      { ligne: 2, label: "Ligne 2", surface: 1.7 },
+      { ligne: 3, label: "Ligne 3", surface: 1.7 }
   ]},
   { label: "Bousquet et Riou", lignes: [
-      { ligne: 1, label: "Bousquet", caption: "Ligne 1" },
-      { ligne: 2, label: "Riou", caption: "Ligne 2" }
+      { ligne: 1, label: "Bousquet", caption: "Ligne 1", surface: 0.5 },
+      { ligne: 2, label: "Riou", caption: "Ligne 2", surface: 0.6 }
   ]}
 ];
 /* ============================================================ */
@@ -407,6 +424,10 @@ function renderForm(prefill){
           <input type="number" id="f_vol" inputmode="decimal" step="0.01">
         </div>
 
+        <div class="mm-info" id="mmInfo">
+          ≈ <span id="mmValue">0</span> mm <span class="mm-sub">apportés sur ${currentLigne.surface} ha (à titre indicatif, non enregistré)</span>
+        </div>
+
         <button type="submit" class="save-btn" id="saveBtn">Enregistrer</button>
         <div class="status" id="status"></div>
       </form>
@@ -430,9 +451,21 @@ function renderForm(prefill){
     if(!isNaN(d) && !isNaN(f) && f >= d){
       $vol.value = (f - d).toFixed(2);
     }
+    recalcMm();
+  }
+  function recalcMm(){
+    const v = parseFloat($vol.value);
+    const mmEl = document.getElementById("mmValue");
+    if(!mmEl) return;
+    if(!isNaN(v) && currentLigne.surface > 0){
+      mmEl.textContent = (v / currentLigne.surface / 10).toFixed(1);
+    } else {
+      mmEl.textContent = "0";
+    }
   }
   $debut.addEventListener("input", recalc);
   $fin.addEventListener("input", recalc);
+  $vol.addEventListener("input", recalcMm);
 
   document.getElementById("entryForm").addEventListener("submit", onSubmit);
 
@@ -479,25 +512,27 @@ async function onSubmit(ev){
   statusEl.className = "status pending";
 
   try{
-    const res = await fetch(SCRIPT_URL, {
+    // mode "no-cors" : Apps Script ne renvoie pas toujours les en-têtes CORS nécessaires
+    // pour lire la réponse depuis le navigateur. La requête part bien et s'exécute côté
+    // Google (statut 200), mais on ne peut plus lire le contenu de la réponse ici.
+    await fetch(SCRIPT_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" }, // évite le préflight CORS côté Apps Script
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify(payload)
     });
-    const data = await res.json();
-    if(data && data.ok){
-      statusEl.textContent = "✓ Enregistré";
-      statusEl.className = "status ok";
-      sessionLog.push({ date: payload.date, vol: payload.m3 });
 
-      // Prépare la saisie suivante : le compteur fin devient le prochain compteur début
-      const nextDebut = payload.compteur_fin;
-      renderForm({ date: payload.date, debut: nextDebut });
-      document.getElementById("status").textContent = "✓ Enregistré";
-      document.getElementById("status").className = "status ok";
-    } else {
-      throw new Error((data && data.error) || "Erreur inconnue");
-    }
+    // On ne peut pas confirmer via la réponse (bloquée par CORS), donc on considère
+    // que ça a fonctionné si l'envoi n'a pas levé d'erreur réseau.
+    statusEl.textContent = "✓ Enregistré (vérifie ton Sheet de temps en temps)";
+    statusEl.className = "status ok";
+    sessionLog.push({ date: payload.date, vol: payload.m3 });
+
+    // Prépare la saisie suivante : le compteur fin devient le prochain compteur début
+    const nextDebut = payload.compteur_fin;
+    renderForm({ date: payload.date, debut: nextDebut });
+    document.getElementById("status").textContent = "✓ Enregistré (vérifie ton Sheet de temps en temps)";
+    document.getElementById("status").className = "status ok";
   } catch(err){
     statusEl.textContent = "✗ Échec de l'envoi — vérifie ta connexion et réessaie.";
     statusEl.className = "status err";
