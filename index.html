@@ -276,9 +276,7 @@
    CONFIGURATION — à modifier avant de mettre en ligne l'appli
    ============================================================ */
 // Colle ici l'URL de ton déploiement Google Apps Script (voir instructions).
-// Exemple : "https://script.google.com/macros/s/AKfycb.../exec"
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxcnc-MWrn2ku7JT-IUcmGQ_lVUUax-IKXX7qX5yYJFZK6f8TnvEYiV2L-gmsRBUYd5/exec";
-
+// Exemple : "https://script.google.com/macros/s/AKfycbxq41pnkTYHdeKTzt9EJi7FRPEH_KMlbvuHyjmPXQ5zGZEYubYy_RNs_rXnSL_gDi_o/exec";
 // Structure réelle du classeur : chaque onglet a 2 ou 3 lignes d'irrigation.
 // "ligne" = numéro du bloc de colonnes dans l'onglet (1, 2 ou 3) — utilisé par le script Apps Script
 // pour retrouver automatiquement les bonnes colonnes, quel que soit le libellé affiché ici.
@@ -341,13 +339,42 @@ function dropIcon(){
   </svg>`;
 }
 
-function renderSelect(){
+function renderChoice(){
   currentTab = null;
+  currentLigne = null;
   app.innerHTML = `
     <header>
       ${dropIcon()}
       <p class="eyebrow">Truffière</p>
       <h1>Suivi irrigation</h1>
+    </header>
+    <main>
+      <p class="subtitle">Que veux-tu enregistrer ?</p>
+      <div class="parcel-grid">
+        <button class="parcel-card" id="choiceArrosage">
+          <span class="mark"></span>
+          <span class="name">Arrosage</span>
+        </button>
+        <button class="parcel-card" id="choicePluie">
+          <span class="mark" style="background:#3E7C8C;"></span>
+          <span class="name">Pluie</span>
+        </button>
+      </div>
+    </main>
+  `;
+  document.getElementById("choiceArrosage").addEventListener("click", renderSelect);
+  document.getElementById("choicePluie").addEventListener("click", renderPluieForm);
+}
+
+function renderSelect(){
+  currentTab = null;
+  app.innerHTML = `
+    <header>
+      <div class="back-row">
+        <button class="back-btn" id="backBtn">‹</button>
+      </div>
+      <p class="eyebrow">Truffière</p>
+      <h1>Arrosage</h1>
     </header>
     <main>
       <p class="subtitle">Choisis la parcelle à renseigner.</p>
@@ -361,6 +388,7 @@ function renderSelect(){
       </div>
     </main>
   `;
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
   app.querySelectorAll(".parcel-card").forEach(btn=>{
     btn.addEventListener("click", ()=>{
       currentTab = TABS[parseInt(btn.dataset.idx)];
@@ -399,6 +427,111 @@ function renderLigneSelect(){
       renderForm();
     });
   });
+}
+
+// Brouillon dédié à la pluie (indépendant des parcelles/lignes, puisque ça s'applique à toutes)
+const PLUIE_DRAFT_KEY = "irrigation_draft::PLUIE";
+function savePluieDraft(values){
+  try{ localStorage.setItem(PLUIE_DRAFT_KEY, JSON.stringify(values)); }catch(e){}
+}
+function loadPluieDraft(){
+  try{
+    const raw = localStorage.getItem(PLUIE_DRAFT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+function clearPluieDraft(){
+  try{ localStorage.removeItem(PLUIE_DRAFT_KEY); }catch(e){}
+}
+
+function renderPluieForm(){
+  const draft = loadPluieDraft() || {};
+  const needsSetup = SCRIPT_URL.indexOf("COLLE_ICI") === 0;
+
+  app.innerHTML = `
+    <header>
+      <div class="back-row">
+        <button class="back-btn" id="backBtn">‹</button>
+      </div>
+      <p class="eyebrow">Truffière</p>
+      <h1>Pluie</h1>
+    </header>
+    <main>
+      ${needsSetup ? `<div class="setup-banner">⚠️ L'URL du script Google n'est pas encore configurée. Modifie la constante <code>SCRIPT_URL</code> en haut du fichier <code>index.html</code>.</div>` : ""}
+
+      <p class="subtitle">Cette saisie s'appliquera automatiquement à toutes les parcelles.</p>
+
+      <form id="pluieForm">
+        <div class="field">
+          <label>Date</label>
+          <input type="date" id="p_date" value="${draft.date || todayISO()}" required>
+        </div>
+
+        <div class="field volume">
+          <label>Pluie <span class="unit">(mm)</span></label>
+          <input type="number" id="p_mm" inputmode="decimal" step="0.1" min="0" placeholder="ex : 12.5" value="${draft.mm ?? ''}" required>
+        </div>
+
+        <button type="submit" class="save-btn" id="pluieSaveBtn" style="background:#3E7C8C;">Enregistrer</button>
+        <div class="status" id="pluieStatus"></div>
+      </form>
+    </main>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
+
+  const $pdate = document.getElementById("p_date");
+  const $pmm = document.getElementById("p_mm");
+  function persist(){
+    savePluieDraft({ date: $pdate.value, mm: $pmm.value });
+  }
+  $pdate.addEventListener("input", persist);
+  $pmm.addEventListener("input", persist);
+
+  document.getElementById("pluieForm").addEventListener("submit", onPluieSubmit);
+}
+
+async function onPluieSubmit(ev){
+  ev.preventDefault();
+  const statusEl = document.getElementById("pluieStatus");
+  const saveBtn = document.getElementById("pluieSaveBtn");
+
+  if(SCRIPT_URL.indexOf("COLLE_ICI") === 0){
+    statusEl.textContent = "⚠️ Configure d'abord l'URL du script (voir bandeau ci-dessus).";
+    statusEl.className = "status err";
+    return;
+  }
+
+  const payload = {
+    mode: "pluie",
+    date: document.getElementById("p_date").value,
+    mm: document.getElementById("p_mm").value
+  };
+
+  saveBtn.disabled = true;
+  statusEl.textContent = "Enregistrement…";
+  statusEl.className = "status pending";
+
+  try{
+    await fetch(SCRIPT_URL, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload)
+    });
+
+    clearPluieDraft();
+    statusEl.textContent = "✓ Enregistré sur toutes les parcelles (vérifie ton Sheet de temps en temps)";
+    statusEl.className = "status ok";
+    // Repart sur une nouvelle saisie vierge (même date par défaut = aujourd'hui)
+    renderPluieForm();
+    document.getElementById("pluieStatus").textContent = "✓ Enregistré sur toutes les parcelles (vérifie ton Sheet de temps en temps)";
+    document.getElementById("pluieStatus").className = "status ok";
+  } catch(err){
+    statusEl.textContent = "✗ Échec de l'envoi — vérifie ta connexion et réessaie.";
+    statusEl.className = "status err";
+    saveBtn.disabled = false;
+  }
 }
 
 function renderForm(prefill){
@@ -612,7 +745,7 @@ if("serviceWorker" in navigator){
   });
 }
 
-renderSelect();
+renderChoice();
 </script>
 </body>
 </html>
