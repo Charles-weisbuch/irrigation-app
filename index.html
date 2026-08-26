@@ -277,7 +277,7 @@
    ============================================================ */
 // Colle ici l'URL de ton déploiement Google Apps Script (voir instructions).
 // Exemple : "https://script.google.com/macros/s/AKfycb.../exec"
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwkueOXcHkIYk5ek0rHHWvTAs7aZNlOx8po1OOV2UICLQXgQMdnnRphIBXoUdJhCdgL/exec";
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbywGvDi2NnqFXWTDpb4n6NhyRmDwKV7Nj7s2PmvS2CTNVR3OjfPpvA-xP59LP0TwqFztA/exec";
 
 // Structure réelle du classeur : chaque onglet a 2 ou 3 lignes d'irrigation.
 // "ligne" = numéro du bloc de colonnes dans l'onglet (1, 2 ou 3) — utilisé par le script Apps Script
@@ -358,7 +358,7 @@ function renderChoice(){
           <span class="name">Arrosage</span>
         </button>
         <button class="parcel-card" id="choicePluie">
-          <span class="mark" style="background:#3E7C8C;"></span>
+          <span class="mark" style="background:#B5540A;"></span>
           <span class="name">Pluie</span>
         </button>
       </div>
@@ -474,7 +474,7 @@ function renderPluieForm(){
           <input type="number" id="p_mm" inputmode="decimal" step="0.1" min="0" placeholder="ex : 12.5" value="${draft.mm ?? ''}" required>
         </div>
 
-        <button type="submit" class="save-btn" id="pluieSaveBtn" style="background:#3E7C8C;">Enregistrer</button>
+        <button type="submit" class="save-btn" id="pluieSaveBtn" style="background:#B5540A;">Enregistrer</button>
         <div class="status" id="pluieStatus"></div>
       </form>
     </main>
