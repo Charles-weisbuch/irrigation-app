@@ -266,6 +266,107 @@
     border-radius: 4px;
     font-size: 12px;
   }
+
+  /* ---------- Lien de consultation ---------- */
+  .consult-link{
+    width:100%;
+    margin-top: 18px;
+    background: var(--card);
+    border: 1px solid #E1DACB;
+    border-radius: 14px;
+    padding: 14px 16px;
+    display:flex;
+    align-items:center;
+    gap: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--green-deep);
+    cursor:pointer;
+  }
+  .consult-link:active{ background: #F1EEE3; }
+  .consult-icon{ font-size: 18px; }
+  .consult-chevron{ margin-left:auto; color: var(--ink-soft); font-size: 20px; }
+
+  /* ---------- Consultation : grille de mini-cartes ---------- */
+  .mini-grid{
+    display:grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .mini-card{
+    background: var(--card);
+    border: none;
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: 14px;
+    text-align:left;
+    cursor:pointer;
+    display:flex;
+    flex-direction:column;
+    gap: 6px;
+    min-height: 84px;
+  }
+  .mini-card:active{ transform: scale(0.97); }
+  .mini-card .mini-onglet{
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-soft);
+    font-weight: 700;
+  }
+  .mini-card .mini-ligne{
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--green-deep);
+    line-height: 1.25;
+  }
+  .mini-card .mini-total{
+    margin-top:auto;
+    font-size: 12px;
+    color: var(--water);
+    font-weight: 600;
+  }
+
+  /* ---------- Détail : table du bilan mensuel ---------- */
+  .bilan-table{
+    width:100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border-radius: 14px;
+    overflow:hidden;
+    box-shadow: var(--shadow);
+    font-size: 13px;
+  }
+  .bilan-table th{
+    background: #073763;
+    color: #fff;
+    padding: 10px 8px;
+    text-align:left;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .bilan-table td{
+    padding: 9px 8px;
+    border-bottom: 1px solid #EFEAE0;
+  }
+  .bilan-table tr:last-child td{
+    font-weight:700;
+    border-bottom:none;
+    background: #F1EEE3;
+  }
+  .loading-msg{
+    text-align:center;
+    color: var(--ink-soft);
+    padding: 30px 0;
+    font-size: 14px;
+  }
+  .error-msg{
+    text-align:center;
+    color: var(--danger);
+    padding: 20px 0;
+    font-size: 14px;
+  }
 </style>
 </head>
 <body>
@@ -276,8 +377,7 @@
    CONFIGURATION — à modifier avant de mettre en ligne l'appli
    ============================================================ */
 // Colle ici l'URL de ton déploiement Google Apps Script (voir instructions).
-// Exemple : "https://script.google.com/macros/s/AKfycb.../exec"
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbywGvDi2NnqFXWTDpb4n6NhyRmDwKV7Nj7s2PmvS2CTNVR3OjfPpvA-xP59LP0TwqFztA/exec";
+// Exemple : "https://script.google.com/macros/s/AKfycbwkueOXcHkIYk5ek0rHHWvTAs7aZNlOx8po1OOV2UICLQXgQMdnnRphIBXoUdJhCdgL/exec";
 
 // Structure réelle du classeur : chaque onglet a 2 ou 3 lignes d'irrigation.
 // "ligne" = numéro du bloc de colonnes dans l'onglet (1, 2 ou 3) — utilisé par le script Apps Script
@@ -355,17 +455,142 @@ function renderChoice(){
       <div class="parcel-grid">
         <button class="parcel-card" id="choiceArrosage">
           <span class="mark"></span>
-          <span class="name">Arrosage</span>
+          <span class="name">Saisie arrosage</span>
         </button>
         <button class="parcel-card" id="choicePluie">
           <span class="mark" style="background:#B5540A;"></span>
-          <span class="name">Pluie</span>
+          <span class="name">Saisie pluie</span>
         </button>
       </div>
+
+      <button class="consult-link" id="choiceConsultation">
+        <span class="consult-icon">📊</span>
+        <span>Consulter les tableaux</span>
+        <span class="consult-chevron">›</span>
+      </button>
     </main>
   `;
   document.getElementById("choiceArrosage").addEventListener("click", renderSelect);
   document.getElementById("choicePluie").addEventListener("click", renderPluieForm);
+  document.getElementById("choiceConsultation").addEventListener("click", renderConsultation);
+}
+
+/* ============================================================
+   CONSULTATION — lecture des 11 tableaux de bilan mensuel
+   ============================================================ */
+let bilansCache = null; // évite de recharger à chaque aller-retour dans la même session
+
+// Contourne le blocage CORS en lecture via JSONP (une balise <script> n'est pas
+// soumise aux mêmes restrictions qu'une requête fetch/XHR classique).
+function fetchBilansJSONP(){
+  return new Promise((resolve, reject) => {
+    const cbName = "bilanCallback_" + Date.now();
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("Délai dépassé"));
+    }, 15000);
+
+    function cleanup(){
+      delete window[cbName];
+      if(scriptTag.parentNode) scriptTag.parentNode.removeChild(scriptTag);
+      clearTimeout(timeout);
+    }
+
+    window[cbName] = (data) => { cleanup(); resolve(data); };
+
+    const scriptTag = document.createElement("script");
+    scriptTag.src = SCRIPT_URL + "?action=bilans&callback=" + cbName;
+    scriptTag.onerror = () => { cleanup(); reject(new Error("Échec du chargement")); };
+    document.body.appendChild(scriptTag);
+  });
+}
+
+async function renderConsultation(){
+  app.innerHTML = `
+    <header>
+      <div class="back-row">
+        <button class="back-btn" id="backBtn">‹</button>
+      </div>
+      <p class="eyebrow">Truffière</p>
+      <h1>Consultation</h1>
+    </header>
+    <main>
+      <p class="subtitle">Bilan mensuel pluie / arrosage par parcelle et ligne.</p>
+      <div id="consultBody"><p class="loading-msg">Chargement…</p></div>
+    </main>
+  `;
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
+
+  const body = document.getElementById("consultBody");
+
+  if(!bilansCache){
+    try{
+      bilansCache = await fetchBilansJSONP();
+    }catch(err){
+      body.innerHTML = `<p class="error-msg">✗ Impossible de charger les tableaux — vérifie ta connexion et réessaie.</p>`;
+      return;
+    }
+  }
+
+  if(!bilansCache || bilansCache.length === 0){
+    body.innerHTML = `<p class="error-msg">Aucun tableau trouvé.</p>`;
+    return;
+  }
+
+  body.innerHTML = `
+    <div class="mini-grid">
+      ${bilansCache.map((b,i) => {
+        const total = b.mois[b.mois.length-1]; // dernière ligne = TOTAL
+        return `
+          <button class="mini-card" data-idx="${i}">
+            <span class="mini-onglet">${b.onglet}</span>
+            <span class="mini-ligne">${b.label}</span>
+            <span class="mini-total">${total ? total.cumul : 0} mm cumulés</span>
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
+  body.querySelectorAll(".mini-card").forEach(btn => {
+    btn.addEventListener("click", () => renderBilanDetail(bilansCache[parseInt(btn.dataset.idx)]));
+  });
+}
+
+function renderBilanDetail(bilan){
+  app.innerHTML = `
+    <header>
+      <div class="back-row">
+        <button class="back-btn" id="backBtn">‹</button>
+      </div>
+      <p class="eyebrow">${bilan.onglet}</p>
+      <h1>${bilan.label}</h1>
+    </header>
+    <main>
+      <table class="bilan-table">
+        <thead>
+          <tr>
+            <th>Mois</th>
+            <th>Pluie (mm)</th>
+            <th>Arrosage (mm)</th>
+            <th>Cumul</th>
+            <th>Besoins Etc (mm)</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${bilan.mois.map(m => `
+            <tr>
+              <td>${m.mois}</td>
+              <td>${m.pluie}</td>
+              <td>${m.arrosage}</td>
+              <td>${m.cumul}</td>
+              <td>${m.besoins}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </main>
+  `;
+  document.getElementById("backBtn").addEventListener("click", renderConsultation);
 }
 
 function renderSelect(){
