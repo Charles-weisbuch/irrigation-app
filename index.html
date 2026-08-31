@@ -287,48 +287,72 @@
   .consult-icon{ font-size: 18px; }
   .consult-chevron{ margin-left:auto; color: var(--ink-soft); font-size: 20px; }
 
-  /* ---------- Consultation : grille de mini-cartes ---------- */
-  .mini-grid{
-    display:grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-  }
-  .mini-card{
-    background: var(--card);
-    border: none;
-    border-radius: 14px;
-    box-shadow: var(--shadow);
-    padding: 14px;
-    text-align:left;
-    cursor:pointer;
+  /* ---------- Consultation : barre d'onglets parcelle ---------- */
+  .parcelle-tabs{
     display:flex;
-    flex-direction:column;
-    gap: 6px;
-    min-height: 84px;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin-bottom: 18px;
+    -webkit-overflow-scrolling: touch;
   }
-  .mini-card:active{ transform: scale(0.97); }
-  .mini-card .mini-onglet{
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+  .parcelle-tab{
+    flex: 0 0 auto;
+    background: var(--card);
+    border: 1px solid #E1DACB;
+    border-radius: 999px;
+    padding: 9px 16px;
+    font-size: 13px;
+    font-weight: 600;
     color: var(--ink-soft);
-    font-weight: 700;
+    white-space: nowrap;
+    cursor:pointer;
   }
-  .mini-card .mini-ligne{
-    font-family: Georgia, "Times New Roman", serif;
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--green-deep);
-    line-height: 1.25;
-  }
-  .mini-card .mini-total{
-    margin-top:auto;
-    font-size: 12px;
-    color: var(--water);
-    font-weight: 600;
+  .parcelle-tab.active{
+    background: var(--green-deep);
+    border-color: var(--green-deep);
+    color: var(--cream);
   }
 
-  /* ---------- Détail : table du bilan mensuel ---------- */
+  .cumul-row{
+    display:flex;
+    gap: 10px;
+    overflow-x:auto;
+    margin-bottom: 20px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .cumul-chip{
+    flex: 0 0 auto;
+    border-radius: 12px;
+    padding: 10px 14px;
+    min-width: 108px;
+  }
+  .cumul-chip .chip-ligne{
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--ink-soft);
+    margin-bottom: 2px;
+  }
+  .cumul-chip .chip-value{
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--green-deep);
+  }
+  .cumul-chip .chip-unit{ font-size: 11px; font-weight: 400; color: var(--ink-soft); }
+
+  .ligne-section{ margin-bottom: 26px; }
+  .ligne-section h2{
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--green-deep);
+    margin: 0 0 8px 0;
+    padding-left: 2px;
+    border-left: 5px solid var(--ligne-color, var(--gold));
+    padding-left: 8px;
+  }
+
+  /* ---------- Table du bilan mensuel ---------- */
   .bilan-table{
     width:100%;
     border-collapse: collapse;
@@ -506,6 +530,16 @@ function fetchBilansJSONP(){
   });
 }
 
+let currentConsultTab = null; // onglet parcelle actuellement affiché dans la consultation
+
+// Couleurs par ligne, cohérentes avec celles utilisées côté Sheet
+const COULEURS_LIGNE_UI = { 1: "#FCE5CD", 2: "#CFE2F3", 3: "#D9EAD3" };
+const COULEURS_LIGNE_TEXTE = { 1: "#B5540A", 2: "#2E5F8A", 3: "#3A7A4E" };
+
+function arrondi(n){
+  return Math.round(Number(n) || 0);
+}
+
 async function renderConsultation(){
   app.innerHTML = `
     <header>
@@ -516,7 +550,6 @@ async function renderConsultation(){
       <h1>Consultation</h1>
     </header>
     <main>
-      <p class="subtitle">Bilan mensuel pluie / arrosage par parcelle et ligne.</p>
       <div id="consultBody"><p class="loading-msg">Chargement…</p></div>
     </main>
   `;
@@ -538,60 +571,83 @@ async function renderConsultation(){
     return;
   }
 
+  // Liste des parcelles dans l'ordre d'apparition des données reçues (déjà dans le bon
+  // ordre côté script), sans dépendre des libellés de l'appli — évite tout désaccord
+  // de casse/orthographe avec les noms d'onglets réels du Sheet (ex. "La baume").
+  const parcelles = [];
+  bilansCache.forEach(b => { if(!parcelles.includes(b.onglet)) parcelles.push(b.onglet); });
+  if(!currentConsultTab || !parcelles.includes(currentConsultTab)){
+    currentConsultTab = parcelles[0];
+  }
+
   body.innerHTML = `
-    <div class="mini-grid">
-      ${bilansCache.map((b,i) => {
-        const total = b.mois[b.mois.length-1]; // dernière ligne = TOTAL
-        return `
-          <button class="mini-card" data-idx="${i}">
-            <span class="mini-onglet">${b.onglet}</span>
-            <span class="mini-ligne">${b.label}</span>
-            <span class="mini-total">${total ? total.cumul : 0} mm cumulés</span>
-          </button>
-        `;
-      }).join("")}
+    <div class="parcelle-tabs" id="parcelleTabs">
+      ${parcelles.map(p => `
+        <button class="parcelle-tab${p === currentConsultTab ? ' active' : ''}" data-onglet="${p}">${p}</button>
+      `).join("")}
     </div>
+    <div id="parcelleContent"></div>
   `;
-  body.querySelectorAll(".mini-card").forEach(btn => {
-    btn.addEventListener("click", () => renderBilanDetail(bilansCache[parseInt(btn.dataset.idx)]));
+  body.querySelectorAll(".parcelle-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      currentConsultTab = btn.dataset.onglet;
+      renderConsultation();
+    });
   });
+
+  renderParcelleContent(document.getElementById("parcelleContent"), currentConsultTab);
 }
 
-function renderBilanDetail(bilan){
-  app.innerHTML = `
-    <header>
-      <div class="back-row">
-        <button class="back-btn" id="backBtn">‹</button>
+function renderParcelleContent(container, onglet){
+  const lignes = bilansCache.filter(b => b.onglet === onglet).sort((a,b) => a.ligne - b.ligne);
+
+  const cumulRow = lignes.map(b => {
+    const total = b.mois[b.mois.length - 1]; // dernière ligne = TOTAL
+    const bg = COULEURS_LIGNE_UI[b.ligne] || "#F1EEE3";
+    const txt = COULEURS_LIGNE_TEXTE[b.ligne] || "#22291F";
+    return `
+      <div class="cumul-chip" style="background:${bg};">
+        <div class="chip-ligne" style="color:${txt};">${b.label}</div>
+        <div class="chip-value" style="color:${txt};">${arrondi(total ? total.cumul : 0)}<span class="chip-unit"> mm</span></div>
       </div>
-      <p class="eyebrow">${bilan.onglet}</p>
-      <h1>${bilan.label}</h1>
-    </header>
-    <main>
-      <table class="bilan-table">
-        <thead>
-          <tr>
-            <th>Mois</th>
-            <th>Pluie (mm)</th>
-            <th>Arrosage (mm)</th>
-            <th>Cumul</th>
-            <th>Besoins Etc (mm)</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${bilan.mois.map(m => `
+    `;
+  }).join("");
+
+  const tables = lignes.map(b => {
+    const bg = COULEURS_LIGNE_UI[b.ligne] || "#F1EEE3";
+    return `
+      <div class="ligne-section" style="--ligne-color:${bg};">
+        <h2>${b.label}</h2>
+        <table class="bilan-table">
+          <thead>
             <tr>
-              <td>${m.mois}</td>
-              <td>${m.pluie}</td>
-              <td>${m.arrosage}</td>
-              <td>${m.cumul}</td>
-              <td>${m.besoins}</td>
+              <th>Mois</th>
+              <th>Pluie (mm)</th>
+              <th>Arrosage (mm)</th>
+              <th>Cumul</th>
+              <th>Besoins Etc (mm)</th>
             </tr>
-          `).join("")}
-        </tbody>
-      </table>
-    </main>
+          </thead>
+          <tbody>
+            ${b.mois.map(m => `
+              <tr>
+                <td>${m.mois}</td>
+                <td>${arrondi(m.pluie)}</td>
+                <td>${arrondi(m.arrosage)}</td>
+                <td>${arrondi(m.cumul)}</td>
+                <td>${arrondi(m.besoins)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }).join("");
+
+  container.innerHTML = `
+    <div class="cumul-row">${cumulRow}</div>
+    ${tables}
   `;
-  document.getElementById("backBtn").addEventListener("click", renderConsultation);
 }
 
 function renderSelect(){
