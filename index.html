@@ -273,6 +273,25 @@
     font-size: 12px;
   }
 
+  /* ---------- Écran d'accueil : pôles Irrigation / Heures ---------- */
+  .pole-title{
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-soft);
+    margin: 0 0 12px 0;
+  }
+  .pole-title-heures{
+    margin-top: 28px;
+    padding-top: 20px;
+    border-top: 1px solid #E1DACB;
+  }
+  .parcel-grid-single{
+    grid-template-columns: 1fr;
+  }
+
   /* ---------- Lien de consultation ---------- */
   .consult-link{
     width:100%;
@@ -292,6 +311,53 @@
   .consult-link:active{ background: #F1EEE3; }
   .consult-icon{ font-size: 18px; }
   .consult-chevron{ margin-left:auto; color: var(--ink-soft); font-size: 20px; }
+
+  /* ---------- Formulaire Heures : select + option "Autre" ---------- */
+  .field select{
+    width:100%;
+    border: 1.5px solid #E1DACB;
+    background: var(--card);
+    border-radius: 12px;
+    padding: 14px 14px;
+    font-size: 17px;
+    color: var(--ink);
+    font-family: inherit;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235C6B5D' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 20px;
+  }
+  .field select:focus{ outline:none; border-color: var(--green-mid); }
+
+  /* ---------- Consultation Heures : listes de totaux ---------- */
+  .total-list{
+    background: var(--card);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow:hidden;
+    margin-bottom: 18px;
+  }
+  .total-list .total-row{
+    display:flex;
+    justify-content: space-between;
+    align-items:center;
+    padding: 12px 14px;
+    border-bottom: 1px solid #EFEAE0;
+    font-size: 14px;
+  }
+  .total-list .total-row:last-child{ border-bottom:none; }
+  .total-list .total-row .t-label{ font-weight:600; color: var(--ink); }
+  .total-list .total-row .t-value{ font-weight:700; color: var(--water); }
+  .total-list.priorite .total-row .t-value{ color: var(--green-deep); font-size: 16px; }
+  .section-title{
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--green-deep);
+    margin: 0 0 8px 2px;
+  }
 
   /* ---------- Consultation : barre d'onglets parcelle ---------- */
   .parcelle-tabs{
@@ -454,11 +520,10 @@ function renderChoice(){
   app.innerHTML = `
     <header>
       ${dropIcon()}
-      <p class="eyebrow">Truffière</p>
-      <h1>Suivi irrigation</h1>
+      <h1>SCEA Les Pilles</h1>
     </header>
     <main>
-      <p class="subtitle">Que veux-tu enregistrer ?</p>
+      <p class="pole-title">Irrigation</p>
       <div class="parcel-grid">
         <button class="parcel-card" id="choiceArrosage">
           <span class="mark"></span>
@@ -469,10 +534,22 @@ function renderChoice(){
           <span class="name">Saisie pluie</span>
         </button>
       </div>
-
       <button class="consult-link" id="choiceConsultation">
         <span class="consult-icon">📊</span>
-        <span>Consulter les tableaux</span>
+        <span>Consulter les tableaux irrigation</span>
+        <span class="consult-chevron">›</span>
+      </button>
+
+      <p class="pole-title pole-title-heures">Heures</p>
+      <div class="parcel-grid parcel-grid-single">
+        <button class="parcel-card" id="choiceHeures">
+          <span class="mark" style="background:#3E7C8C;"></span>
+          <span class="name">Saisie heures</span>
+        </button>
+      </div>
+      <button class="consult-link" id="choiceConsultationHeures">
+        <span class="consult-icon">⏱️</span>
+        <span>Consulter les tableaux heures</span>
         <span class="consult-chevron">›</span>
       </button>
     </main>
@@ -480,6 +557,8 @@ function renderChoice(){
   document.getElementById("choiceArrosage").addEventListener("click", renderSelect);
   document.getElementById("choicePluie").addEventListener("click", renderPluieForm);
   document.getElementById("choiceConsultation").addEventListener("click", renderConsultation);
+  document.getElementById("choiceHeures").addEventListener("click", renderHeuresForm);
+  document.getElementById("choiceConsultationHeures").addEventListener("click", renderConsultationHeures);
 }
 
 /* ============================================================
@@ -489,9 +568,9 @@ let bilansCache = null; // évite de recharger à chaque aller-retour dans la m�
 
 // Contourne le blocage CORS en lecture via JSONP (une balise <script> n'est pas
 // soumise aux mêmes restrictions qu'une requête fetch/XHR classique).
-function fetchBilansJSONP(){
+function fetchJSONP(action){
   return new Promise((resolve, reject) => {
-    const cbName = "bilanCallback_" + Date.now();
+    const cbName = "jsonpCallback_" + Date.now() + "_" + Math.floor(Math.random()*100000);
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Délai dépassé"));
@@ -506,11 +585,12 @@ function fetchBilansJSONP(){
     window[cbName] = (data) => { cleanup(); resolve(data); };
 
     const scriptTag = document.createElement("script");
-    scriptTag.src = SCRIPT_URL + "?action=bilans&callback=" + cbName;
+    scriptTag.src = SCRIPT_URL + "?action=" + action + "&callback=" + cbName;
     scriptTag.onerror = () => { cleanup(); reject(new Error("Échec du chargement")); };
     document.body.appendChild(scriptTag);
   });
 }
+function fetchBilansJSONP(){ return fetchJSONP("bilans"); }
 
 let currentConsultTab = null; // onglet parcelle actuellement affiché dans la consultation
 
@@ -796,6 +876,249 @@ async function onPluieSubmit(ev){
     statusEl.className = "status err";
     saveBtn.disabled = false;
   }
+}
+
+/* ============================================================
+   HEURES — saisie du temps de travail
+   ============================================================ */
+const HEURES_PERSONNES = ["Paul", "René", "Charles", "Externe 1", "Externe 2", "Externe 3"];
+let heuresListesCache = null; // { personnes, lieux, taches }
+let bilanHeuresCache = null;
+
+const HEURES_DRAFT_KEY = "irrigation_draft::HEURES";
+function saveHeuresDraft(values){
+  try{ localStorage.setItem(HEURES_DRAFT_KEY, JSON.stringify(values)); }catch(e){}
+}
+function loadHeuresDraft(){
+  try{
+    const raw = localStorage.getItem(HEURES_DRAFT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+function clearHeuresDraft(){
+  try{ localStorage.removeItem(HEURES_DRAFT_KEY); }catch(e){}
+}
+
+async function renderHeuresForm(){
+  const draft = loadHeuresDraft() || {};
+  const needsSetup = SCRIPT_URL.indexOf("COLLE_ICI") === 0;
+
+  app.innerHTML = `
+    <header>
+      <div class="back-row">
+        <button class="back-btn" id="backBtn">‹</button>
+      </div>
+      <p class="eyebrow">Heures</p>
+      <h1>Saisie heures</h1>
+    </header>
+    <main>
+      ${needsSetup ? `<div class="setup-banner">⚠️ L'URL du script Google n'est pas encore configurée.</div>` : ""}
+      <div id="heuresBody"><p class="loading-msg">Chargement des listes…</p></div>
+    </main>
+  `;
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
+
+  const body = document.getElementById("heuresBody");
+  if(!heuresListesCache){
+    try{
+      heuresListesCache = await fetchJSONP("listesHeures");
+    }catch(err){
+      body.innerHTML = `<p class="error-msg">✗ Impossible de charger les listes — vérifie ta connexion et réessaie.</p>`;
+      return;
+    }
+  }
+
+  const lieux = heuresListesCache.lieux || [];
+  const taches = heuresListesCache.taches || [];
+
+  body.innerHTML = `
+    <form id="heuresForm">
+      <div class="field">
+        <label>Nom</label>
+        <select id="h_nom" required>
+          ${HEURES_PERSONNES.map(p => `<option value="${p}" ${draft.nom === p ? 'selected' : ''}>${p}</option>`).join("")}
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Date</label>
+        <input type="date" id="h_date" value="${draft.date || todayISO()}" required>
+      </div>
+
+      <div class="field">
+        <label>Parcelle / Lieu</label>
+        <select id="h_lieu">
+          ${lieux.map(l => `<option value="${l}" ${draft.lieu === l ? 'selected' : ''}>${l}</option>`).join("")}
+          <option value="__autre__" ${draft.lieu === '__autre__' ? 'selected' : ''}>Autre…</option>
+        </select>
+        <input type="text" id="h_lieu_autre" placeholder="Précise le lieu" style="margin-top:8px; ${draft.lieu === '__autre__' ? '' : 'display:none;'}" value="${draft.lieuAutre || ''}">
+      </div>
+
+      <div class="field">
+        <label>Tâche</label>
+        <select id="h_tache">
+          ${taches.map(t => `<option value="${t}" ${draft.tache === t ? 'selected' : ''}>${t}</option>`).join("")}
+          <option value="__autre__" ${draft.tache === '__autre__' ? 'selected' : ''}>Autre…</option>
+        </select>
+        <input type="text" id="h_tache_autre" placeholder="Précise la tâche" style="margin-top:8px; ${draft.tache === '__autre__' ? '' : 'display:none;'}" value="${draft.tacheAutre || ''}">
+      </div>
+
+      <div class="field volume">
+        <label>Durée <span class="unit">(heures, ex : 1.5 pour 1h30)</span></label>
+        <input type="number" id="h_duree" inputmode="decimal" step="0.25" min="0" placeholder="ex : 1.5" value="${draft.duree ?? ''}" required>
+      </div>
+
+      <button type="submit" class="save-btn" id="heuresSaveBtn" style="background:#3E7C8C;">Enregistrer</button>
+      <div class="status" id="heuresStatus"></div>
+    </form>
+  `;
+
+  const $nom = document.getElementById("h_nom");
+  const $date = document.getElementById("h_date");
+  const $lieu = document.getElementById("h_lieu");
+  const $lieuAutre = document.getElementById("h_lieu_autre");
+  const $tache = document.getElementById("h_tache");
+  const $tacheAutre = document.getElementById("h_tache_autre");
+  const $duree = document.getElementById("h_duree");
+
+  function persist(){
+    saveHeuresDraft({
+      nom: $nom.value, date: $date.value,
+      lieu: $lieu.value, lieuAutre: $lieuAutre.value,
+      tache: $tache.value, tacheAutre: $tacheAutre.value,
+      duree: $duree.value
+    });
+  }
+
+  $lieu.addEventListener("change", () => {
+    $lieuAutre.style.display = $lieu.value === "__autre__" ? "" : "none";
+    persist();
+  });
+  $tache.addEventListener("change", () => {
+    $tacheAutre.style.display = $tache.value === "__autre__" ? "" : "none";
+    persist();
+  });
+  [$nom, $date, $lieuAutre, $tacheAutre, $duree].forEach($el => $el.addEventListener("input", persist));
+
+  document.getElementById("heuresForm").addEventListener("submit", onHeuresSubmit);
+}
+
+async function onHeuresSubmit(ev){
+  ev.preventDefault();
+  const statusEl = document.getElementById("heuresStatus");
+  const saveBtn = document.getElementById("heuresSaveBtn");
+
+  if(SCRIPT_URL.indexOf("COLLE_ICI") === 0){
+    statusEl.textContent = "⚠️ Configure d'abord l'URL du script.";
+    statusEl.className = "status err";
+    return;
+  }
+
+  const lieuSel = document.getElementById("h_lieu").value;
+  const lieuFinal = lieuSel === "__autre__" ? document.getElementById("h_lieu_autre").value.trim() : lieuSel;
+  const tacheSel = document.getElementById("h_tache").value;
+  const tacheFinal = tacheSel === "__autre__" ? document.getElementById("h_tache_autre").value.trim() : tacheSel;
+
+  if(!lieuFinal || !tacheFinal){
+    statusEl.textContent = "⚠️ Précise le lieu et/ou la tâche (champ « Autre » vide).";
+    statusEl.className = "status err";
+    return;
+  }
+
+  const payload = {
+    mode: "heures",
+    nom: document.getElementById("h_nom").value,
+    date: document.getElementById("h_date").value,
+    lieu: lieuFinal,
+    tache: tacheFinal,
+    duree: document.getElementById("h_duree").value
+  };
+
+  saveBtn.disabled = true;
+  statusEl.textContent = "Enregistrement…";
+  statusEl.className = "status pending";
+
+  try{
+    await fetch(SCRIPT_URL, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload)
+    });
+
+    clearHeuresDraft();
+    // Si un nouveau lieu/tâche a été saisi via "Autre", on l'ajoute localement aux listes
+    // en cache pour qu'il apparaisse tout de suite dans le menu déroulant.
+    if(lieuSel === "__autre__" && heuresListesCache && !heuresListesCache.lieux.includes(lieuFinal)) heuresListesCache.lieux.push(lieuFinal);
+    if(tacheSel === "__autre__" && heuresListesCache && !heuresListesCache.taches.includes(tacheFinal)) heuresListesCache.taches.push(tacheFinal);
+    bilanHeuresCache = null; // les totaux ont changé, on les rechargera à la prochaine consultation
+
+    statusEl.textContent = "✓ Enregistré (vérifie ton Sheet de temps en temps)";
+    statusEl.className = "status ok";
+    renderHeuresForm();
+    setTimeout(() => {
+      const s = document.getElementById("heuresStatus");
+      if(s){ s.textContent = "✓ Enregistré (vérifie ton Sheet de temps en temps)"; s.className = "status ok"; }
+    }, 0);
+  } catch(err){
+    statusEl.textContent = "✗ Échec de l'envoi — vérifie ta connexion et réessaie.";
+    statusEl.className = "status err";
+    saveBtn.disabled = false;
+  }
+}
+
+async function renderConsultationHeures(){
+  app.innerHTML = `
+    <header class="compact">
+      <div class="back-row">
+        <button class="back-btn" id="backBtn">‹</button>
+      </div>
+      <h1>Heures — Consultation</h1>
+    </header>
+    <main class="compact">
+      <div id="heuresConsultBody"><p class="loading-msg">Chargement…</p></div>
+    </main>
+  `;
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
+
+  const body = document.getElementById("heuresConsultBody");
+  if(!bilanHeuresCache){
+    try{
+      bilanHeuresCache = await fetchJSONP("bilanHeures");
+    }catch(err){
+      body.innerHTML = `<p class="error-msg">✗ Impossible de charger les totaux — vérifie ta connexion et réessaie.</p>`;
+      return;
+    }
+  }
+
+  const b = bilanHeuresCache;
+
+  function listeHTML(items, prioritaire){
+    if(!items || items.length === 0) return `<p class="loading-msg">Aucune donnée pour le moment.</p>`;
+    return `
+      <div class="total-list${prioritaire ? ' priorite' : ''}">
+        ${items.map(it => `
+          <div class="total-row">
+            <span class="t-label">${it.label}</span>
+            <span class="t-value">${arrondiHeures(it.total)} h</span>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  body.innerHTML = `
+    <p class="section-title">Total par personne</p>
+    ${listeHTML(b.parPersonne, true)}
+    <p class="section-title">Total par tâche</p>
+    ${listeHTML(b.parTache, false)}
+    <p class="section-title">Total par lieu</p>
+    ${listeHTML(b.parLieu, false)}
+  `;
+}
+
+function arrondiHeures(n){
+  return Math.round((Number(n) || 0) * 100) / 100;
 }
 
 function renderForm(prefill){

@@ -522,6 +522,17 @@ function arrondi(n){
   return Math.round(Number(n) || 0);
 }
 
+// Même logique de couleur que côté Sheet (appliquerCodeCouleurBilan) :
+// vert = objectif atteint, jaune = déficit ≤ 20%, rouge = déficit > 20%.
+function couleurBilan(cumul, besoins){
+  const c = Number(cumul) || 0;
+  const b = Number(besoins) || 0;
+  if(b <= 0) return "";
+  if(c >= b) return "#B7E1CD";
+  if(c >= b * 0.8) return "#FCE8B2";
+  return "#F4C7C3";
+}
+
 async function renderConsultation(){
   app.innerHTML = `
     <header class="compact">
@@ -598,15 +609,18 @@ function renderParcelleContent(container, onglet){
             </tr>
           </thead>
           <tbody>
-            ${b.mois.map(m => `
+            ${b.mois.map(m => {
+              const c = couleurBilan(m.cumul, m.besoins);
+              return `
               <tr>
                 <td>${m.mois}</td>
                 <td>${arrondi(m.pluie)}</td>
                 <td>${arrondi(m.arrosage)}</td>
-                <td>${arrondi(m.cumul)}</td>
-                <td>${arrondi(m.besoins)}</td>
+                <td style="background:${c};">${arrondi(m.cumul)}</td>
+                <td style="background:${c};">${arrondi(m.besoins)}</td>
               </tr>
-            `).join("")}
+            `;
+            }).join("")}
           </tbody>
         </table>
       </div>
