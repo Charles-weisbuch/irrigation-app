@@ -348,6 +348,14 @@
     font-size: 14px;
   }
   .total-list .total-row:last-child{ border-bottom:none; }
+  .recent-row{ padding-bottom: 2px !important; border-bottom: none !important; }
+  .recent-sub{
+    padding: 0 14px 10px 14px;
+    font-size: 12px;
+    color: var(--ink-soft);
+    border-bottom: 1px solid #EFEAE0;
+  }
+  .total-list .recent-sub:last-child{ border-bottom:none; }
   .total-list .total-row .t-label{ font-weight:600; color: var(--ink); }
   .total-list .total-row .t-value{ font-weight:700; color: var(--water); }
   .total-list.priorite .total-row .t-value{ color: var(--green-deep); font-size: 16px; }
@@ -983,6 +991,9 @@ async function renderHeuresForm(){
       <button type="submit" class="save-btn" id="heuresSaveBtn" style="background:#3E7C8C;">Enregistrer</button>
       <div class="status" id="heuresStatus"></div>
     </form>
+
+    <p class="section-title" style="margin-top:26px;">Dernières saisies <span class="unit">(pour contrôle)</span></p>
+    <div id="recentHeuresList"><p class="loading-msg">Chargement…</p></div>
   `;
 
   const $nom = document.getElementById("h_nom");
@@ -1014,6 +1025,33 @@ async function renderHeuresForm(){
   [$nom, $date, $lieuAutre, $tacheAutre, $heures, $minutes].forEach($el => $el.addEventListener("input", persist));
 
   document.getElementById("heuresForm").addEventListener("submit", onHeuresSubmit);
+
+  loadRecentHeures();
+}
+
+async function loadRecentHeures(){
+  const container = document.getElementById("recentHeuresList");
+  if(!container) return;
+  try{
+    const recentes = await fetchJSONP("dernieresSaisiesHeures");
+    if(!recentes || recentes.length === 0){
+      container.innerHTML = `<p class="loading-msg">Aucune saisie pour le moment.</p>`;
+      return;
+    }
+    container.innerHTML = `
+      <div class="total-list">
+        ${recentes.map(r => `
+          <div class="total-row recent-row">
+            <span class="t-label">${r.date} · ${r.personne}</span>
+            <span class="t-value">${r.temps} h</span>
+          </div>
+          <div class="recent-sub">${r.lieu} · ${r.tache}</div>
+        `).join("")}
+      </div>
+    `;
+  }catch(err){
+    container.innerHTML = `<p class="error-msg">✗ Impossible de charger les dernières saisies.</p>`;
+  }
 }
 
 async function onHeuresSubmit(ev){
