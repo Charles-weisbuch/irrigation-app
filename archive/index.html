@@ -331,6 +331,53 @@
   }
   .field select:focus{ outline:none; border-color: var(--green-mid); }
 
+  /* ---------- Sélecteur rapide de durée (heures puis minutes en 2 taps) ---------- */
+  .picker-grid{
+    display:grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+  .picker-btn{
+    background: var(--card);
+    border: 1.5px solid #E1DACB;
+    border-radius: 12px;
+    padding: 14px 0;
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--ink);
+    cursor:pointer;
+  }
+  .picker-btn:active{ background: var(--water); color:#fff; border-color: var(--water); }
+  .picker-step-label{
+    font-size: 12px;
+    color: var(--ink-soft);
+    margin: 0 0 8px 0;
+    font-weight: 600;
+  }
+  .duree-summary{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    background: #F1F7F8;
+    border: 1.5px solid var(--water);
+    border-radius: 12px;
+    padding: 14px 16px;
+  }
+  .duree-summary .duree-value{
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--water);
+  }
+  .duree-modifier{
+    background: none;
+    border: none;
+    color: var(--green-mid);
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: underline;
+    cursor:pointer;
+  }
+
   /* ---------- Consultation Heures : listes de totaux ---------- */
   .total-list{
     background: var(--card);
@@ -977,15 +1024,28 @@ async function renderHeuresForm(){
         <input type="text" id="h_tache_autre" placeholder="Précise la tâche" style="margin-top:8px; ${draft.tache === '__autre__' ? '' : 'display:none;'}" value="${draft.tacheAutre || ''}">
       </div>
 
-      <div class="row-2">
-        <div class="field">
-          <label>Heures</label>
-          <input type="number" id="h_heures" inputmode="numeric" step="1" min="0" placeholder="ex : 1" value="${draft.heures ?? ''}" required>
+      <div class="field">
+        <label>Durée</label>
+        <div id="dureePicker">
+          <div id="dureeStep1">
+            <p class="picker-step-label">Choisis le nombre d'heures</p>
+            <div class="picker-grid">
+              ${[0,1,2,3,4,5,6,7,8,9,10,11,12].map(h => `<button type="button" class="picker-btn" data-h="${h}">${h}</button>`).join("")}
+            </div>
+          </div>
+          <div id="dureeStep2" style="display:none;">
+            <p class="picker-step-label">Choisis les minutes</p>
+            <div class="picker-grid">
+              ${[0,15,30,45].map(m => `<button type="button" class="picker-btn" data-m="${m}">${m}</button>`).join("")}
+            </div>
+          </div>
+          <div id="dureeSummary" class="duree-summary" style="display:none;">
+            <span class="duree-value" id="dureeSummaryText"></span>
+            <button type="button" id="dureeModifier" class="duree-modifier">Modifier</button>
+          </div>
         </div>
-        <div class="field">
-          <label>Minutes</label>
-          <input type="number" id="h_minutes" inputmode="numeric" step="5" min="0" max="59" placeholder="ex : 30" value="${draft.minutes ?? ''}">
-        </div>
+        <input type="hidden" id="h_heures" value="${draft.heures ?? ''}">
+        <input type="hidden" id="h_minutes" value="${draft.minutes ?? ''}">
       </div>
 
       <button type="submit" class="save-btn" id="heuresSaveBtn" style="background:#3E7C8C;">Enregistrer</button>
@@ -1014,6 +1074,50 @@ async function renderHeuresForm(){
     });
   }
 
+  // ---------- Sélecteur de durée en 2 taps : heure puis minute ----------
+  const $dureeStep1 = document.getElementById("dureeStep1");
+  const $dureeStep2 = document.getElementById("dureeStep2");
+  const $dureeSummary = document.getElementById("dureeSummary");
+  const $dureeSummaryText = document.getElementById("dureeSummaryText");
+
+  function afficherEtapeHeures(){
+    $dureeStep1.style.display = ""; $dureeStep2.style.display = "none"; $dureeSummary.style.display = "none";
+  }
+  function afficherEtapeMinutes(){
+    $dureeStep1.style.display = "none"; $dureeStep2.style.display = ""; $dureeSummary.style.display = "none";
+  }
+  function afficherResume(){
+    $dureeStep1.style.display = "none"; $dureeStep2.style.display = "none"; $dureeSummary.style.display = "";
+    const h = $heures.value || "0";
+    const m = ($minutes.value || "0").toString().padStart(2, "0");
+    $dureeSummaryText.textContent = h + " h " + m;
+  }
+
+  $dureeStep1.querySelectorAll(".picker-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      $heures.value = btn.dataset.h;
+      persist();
+      afficherEtapeMinutes();
+    });
+  });
+  $dureeStep2.querySelectorAll(".picker-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      $minutes.value = btn.dataset.m;
+      persist();
+      afficherResume();
+    });
+  });
+  document.getElementById("dureeModifier").addEventListener("click", afficherEtapeHeures);
+
+  // Reprend le brouillon là où il en était
+  if($heures.value !== "" && $minutes.value !== ""){
+    afficherResume();
+  } else if($heures.value !== ""){
+    afficherEtapeMinutes();
+  } else {
+    afficherEtapeHeures();
+  }
+
   $lieu.addEventListener("change", () => {
     $lieuAutre.style.display = $lieu.value === "__autre__" ? "" : "none";
     persist();
@@ -1022,7 +1126,7 @@ async function renderHeuresForm(){
     $tacheAutre.style.display = $tache.value === "__autre__" ? "" : "none";
     persist();
   });
-  [$nom, $date, $lieuAutre, $tacheAutre, $heures, $minutes].forEach($el => $el.addEventListener("input", persist));
+  [$nom, $date, $lieuAutre, $tacheAutre].forEach($el => $el.addEventListener("input", persist));
 
   document.getElementById("heuresForm").addEventListener("submit", onHeuresSubmit);
 
