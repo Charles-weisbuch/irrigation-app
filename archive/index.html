@@ -378,6 +378,19 @@
     cursor:pointer;
   }
 
+  /* ---------- Formulaire Heures compacté (tenir sur un écran sans scroller) ---------- */
+  .heures-compact .field{ margin-bottom: 10px; }
+  .heures-compact .field label{ font-size: 12px; margin-bottom: 4px; }
+  .heures-compact .field input,
+  .heures-compact .field select{ padding: 10px 12px; font-size: 15px; }
+  .heures-compact .row-2{ gap: 10px; }
+  .heures-compact .picker-step-label{ font-size: 11px; margin-bottom: 5px; }
+  .heures-compact .picker-grid{ gap: 6px; }
+  .heures-compact .picker-btn{ padding: 9px 0; font-size: 15px; }
+  .heures-compact .duree-summary{ padding: 10px 14px; }
+  .heures-compact .duree-summary .duree-value{ font-size: 17px; }
+  .heures-compact .save-btn{ padding: 12px; margin-top: 4px; }
+
   /* ---------- Consultation Heures : listes de totaux ---------- */
   .total-list{
     background: var(--card);
@@ -959,14 +972,13 @@ async function renderHeuresForm(){
   const needsSetup = SCRIPT_URL.indexOf("COLLE_ICI") === 0;
 
   app.innerHTML = `
-    <header>
+    <header class="compact">
       <div class="back-row">
         <button class="back-btn" id="backBtn">‹</button>
       </div>
-      <p class="eyebrow">Heures</p>
       <h1>Saisie heures</h1>
     </header>
-    <main>
+    <main class="compact">
       ${needsSetup ? `<div class="setup-banner">⚠️ L'URL du script Google n'est pas encore configurée.</div>` : ""}
       <div id="heuresBody"><p class="loading-msg">Chargement des listes…</p></div>
     </main>
@@ -993,17 +1005,18 @@ async function renderHeuresForm(){
   });
 
   body.innerHTML = `
-    <form id="heuresForm">
-      <div class="field">
-        <label>Nom</label>
-        <select id="h_nom" required>
-          ${HEURES_PERSONNES.map(p => `<option value="${p}" ${draft.nom === p ? 'selected' : ''}>${p}</option>`).join("")}
-        </select>
-      </div>
-
-      <div class="field">
-        <label>Date</label>
-        <input type="date" id="h_date" value="${draft.date || todayISO()}" required>
+    <form id="heuresForm" class="heures-compact">
+      <div class="row-2">
+        <div class="field">
+          <label>Nom</label>
+          <select id="h_nom" required>
+            ${HEURES_PERSONNES.map(p => `<option value="${p}" ${draft.nom === p ? 'selected' : ''}>${p}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label>Date</label>
+          <input type="date" id="h_date" value="${draft.date || todayISO()}" required>
+        </div>
       </div>
 
       <div class="field">
