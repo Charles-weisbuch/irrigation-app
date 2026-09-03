@@ -348,6 +348,14 @@
     font-size: 14px;
   }
   .total-list .total-row:last-child{ border-bottom:none; }
+  .recent-row{ padding-bottom: 2px !important; border-bottom: none !important; }
+  .recent-sub{
+    padding: 0 14px 10px 14px;
+    font-size: 12px;
+    color: var(--ink-soft);
+    border-bottom: 1px solid #EFEAE0;
+  }
+  .total-list .recent-sub:last-child{ border-bottom:none; }
   .total-list .total-row .t-label{ font-weight:600; color: var(--ink); }
   .total-list .total-row .t-value{ font-weight:700; color: var(--water); }
   .total-list.priorite .total-row .t-value{ color: var(--green-deep); font-size: 16px; }
@@ -928,8 +936,14 @@ async function renderHeuresForm(){
     }
   }
 
-  const lieux = heuresListesCache.lieux || [];
-  const taches = heuresListesCache.taches || [];
+  // On retire les entrées "Autre" (déjà gérées par notre propre option "Autre…") et, pour
+  // la liste des tâches, l'entrée littérale "Tache" (résidu de la liste de référence dans le
+  // Sheet), pour éviter tout doublon dans le menu déroulant.
+  const lieux = (heuresListesCache.lieux || []).filter(l => l.trim().toLowerCase() !== "autre");
+  const taches = (heuresListesCache.taches || []).filter(t => {
+    const tl = t.trim().toLowerCase();
+    return tl !== "autre" && tl !== "tache" && tl !== "tâche";
+  });
 
   body.innerHTML = `
     <form id="heuresForm">
@@ -963,14 +977,23 @@ async function renderHeuresForm(){
         <input type="text" id="h_tache_autre" placeholder="Précise la tâche" style="margin-top:8px; ${draft.tache === '__autre__' ? '' : 'display:none;'}" value="${draft.tacheAutre || ''}">
       </div>
 
-      <div class="field volume">
-        <label>Durée <span class="unit">(heures, ex : 1.5 pour 1h30)</span></label>
-        <input type="number" id="h_duree" inputmode="decimal" step="0.25" min="0" placeholder="ex : 1.5" value="${draft.duree ?? ''}" required>
+      <div class="row-2">
+        <div class="field">
+          <label>Heures</label>
+          <input type="number" id="h_heures" inputmode="numeric" step="1" min="0" placeholder="ex : 1" value="${draft.heures ?? ''}" required>
+        </div>
+        <div class="field">
+          <label>Minutes</label>
+          <input type="number" id="h_minutes" inputmode="numeric" step="5" min="0" max="59" placeholder="ex : 30" value="${draft.minutes ?? ''}">
+        </div>
       </div>
 
       <button type="submit" class="save-btn" id="heuresSaveBtn" style="background:#3E7C8C;">Enregistrer</button>
       <div class="status" id="heuresStatus"></div>
     </form>
+
+    <p class="section-title" style="margin-top:26px;">Dernières saisies <span class="unit">(pour contrôle)</span></p>
+    <div id="recentHeuresList"><p class="loading-msg">Chargement…</p></div>
   `;
 
   const $nom = document.getElementById("h_nom");
@@ -979,14 +1002,15 @@ async function renderHeuresForm(){
   const $lieuAutre = document.getElementById("h_lieu_autre");
   const $tache = document.getElementById("h_tache");
   const $tacheAutre = document.getElementById("h_tache_autre");
-  const $duree = document.getElementById("h_duree");
+  const $heures = document.getElementById("h_heures");
+  const $minutes = document.getElementById("h_minutes");
 
   function persist(){
     saveHeuresDraft({
       nom: $nom.value, date: $date.value,
       lieu: $lieu.value, lieuAutre: $lieuAutre.value,
       tache: $tache.value, tacheAutre: $tacheAutre.value,
-      duree: $duree.value
+      heures: $heures.value, minutes: $minutes.value
     });
   }
 
@@ -998,9 +1022,36 @@ async function renderHeuresForm(){
     $tacheAutre.style.display = $tache.value === "__autre__" ? "" : "none";
     persist();
   });
-  [$nom, $date, $lieuAutre, $tacheAutre, $duree].forEach($el => $el.addEventListener("input", persist));
+  [$nom, $date, $lieuAutre, $tacheAutre, $heures, $minutes].forEach($el => $el.addEventListener("input", persist));
 
   document.getElementById("heuresForm").addEventListener("submit", onHeuresSubmit);
+
+  loadRecentHeures();
+}
+
+async function loadRecentHeures(){
+  const container = document.getElementById("recentHeuresList");
+  if(!container) return;
+  try{
+    const recentes = await fetchJSONP("dernieresSaisiesHeures");
+    if(!recentes || recentes.length === 0){
+      container.innerHTML = `<p class="loading-msg">Aucune saisie pour le moment.</p>`;
+      return;
+    }
+    container.innerHTML = `
+      <div class="total-list">
+        ${recentes.map(r => `
+          <div class="total-row recent-row">
+            <span class="t-label">${r.date} · ${r.personne}</span>
+            <span class="t-value">${r.temps} h</span>
+          </div>
+          <div class="recent-sub">${r.lieu} · ${r.tache}</div>
+        `).join("")}
+      </div>
+    `;
+  }catch(err){
+    container.innerHTML = `<p class="error-msg">✗ Impossible de charger les dernières saisies.</p>`;
+  }
 }
 
 async function onHeuresSubmit(ev){
@@ -1025,13 +1076,23 @@ async function onHeuresSubmit(ev){
     return;
   }
 
+  const heures = parseFloat(document.getElementById("h_heures").value) || 0;
+  const minutes = parseFloat(document.getElementById("h_minutes").value) || 0;
+  const dureeDecimale = Math.round((heures + minutes / 60) * 100) / 100;
+
+  if(dureeDecimale <= 0){
+    statusEl.textContent = "⚠️ Renseigne au moins des heures ou des minutes.";
+    statusEl.className = "status err";
+    return;
+  }
+
   const payload = {
     mode: "heures",
     nom: document.getElementById("h_nom").value,
     date: document.getElementById("h_date").value,
     lieu: lieuFinal,
     tache: tacheFinal,
-    duree: document.getElementById("h_duree").value
+    duree: dureeDecimale
   };
 
   saveBtn.disabled = true;
