@@ -3,11 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<title>Suivi Irrigation</title>
+<title>Les Pilles</title>
 <meta name="theme-color" content="#1F3D2B">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Irrigation">
+<meta name="apple-mobile-web-app-title" content="Les Pilles">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="icon" href="icon-192.png">
@@ -75,12 +75,9 @@
     font-weight: 600;
     letter-spacing: 0.01em;
   }
-  header .drop{
-    position: absolute;
-    right: 20px;
-    top: calc(18px + env(safe-area-inset-top));
-    width: 30px; height: 30px;
-    opacity: 0.9;
+  .pole-icon-svg{
+    width: 18px; height: 18px;
+    flex-shrink: 0;
   }
   .back-row{
     display:flex; align-items:center; gap:10px;
@@ -275,6 +272,9 @@
 
   /* ---------- Écran d'accueil : pôles Irrigation / Heures ---------- */
   .pole-title{
+    display:flex;
+    align-items:center;
+    gap: 8px;
     font-family: Georgia, "Times New Roman", serif;
     font-size: 13px;
     font-weight: 700;
@@ -577,8 +577,15 @@ function todayISO(){
 }
 
 function dropIcon(){
-  return `<svg class="drop" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  return `<svg class="pole-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path d="M12 2C12 2 5 11 5 15.5C5 19.6 8.4 23 12 23C15.6 23 19 19.6 19 15.5C19 11 12 2 12 2Z" fill="#C9A227"/>
+  </svg>`;
+}
+
+function clockIcon(){
+  return `<svg class="pole-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="12" cy="12" r="9" stroke="#3E7C8C" stroke-width="2"/>
+    <path d="M12 7v5l3.5 2" stroke="#3E7C8C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>`;
 }
 
@@ -587,11 +594,10 @@ function renderChoice(){
   currentLigne = null;
   app.innerHTML = `
     <header>
-      ${dropIcon()}
       <h1>SCEA Les Pilles</h1>
     </header>
     <main>
-      <p class="pole-title">Irrigation</p>
+      <p class="pole-title">${dropIcon()}<span>Irrigation</span></p>
       <div class="parcel-grid">
         <button class="parcel-card" id="choiceArrosage">
           <span class="mark"></span>
@@ -608,7 +614,7 @@ function renderChoice(){
         <span class="consult-chevron">›</span>
       </button>
 
-      <p class="pole-title pole-title-heures">Heures</p>
+      <p class="pole-title pole-title-heures">${clockIcon()}<span>Heures</span></p>
       <div class="parcel-grid parcel-grid-single">
         <button class="parcel-card" id="choiceHeures">
           <span class="mark" style="background:#3E7C8C;"></span>
