@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Les Pilles">
 <link rel="manifest" href="manifest.json">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" href="icon-192.png">
 
 <style>
@@ -344,6 +344,17 @@
     border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.2); vertical-align: -1px;
   }
   .gros-input{ font-size: 26px !important; font-weight: 700; }
+  .type-seg{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .type-seg button{
+    background: var(--card); border: 1.5px solid #E1DACB; border-radius: 12px;
+    padding: 11px 4px; font-size: 14px; font-weight: 700; color: var(--ink-soft); cursor: pointer;
+  }
+  .type-seg button.on{ background: #6B4423; border-color: #6B4423; color: #fff; }
+  .type-aide{ font-size: 11px; color: var(--ink-soft); margin: 5px 0 0 2px; }
+  .gros-totaux{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+  .gros-totaux .gt{ background: var(--card); border-radius: 14px; box-shadow: var(--shadow); padding: 12px 14px; }
+  .gros-totaux .gt-label{ display: block; font-size: 11px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .06em; }
+  .gros-totaux .gt-val{ display: block; font-size: 22px; font-weight: 700; color: #6B4423; margin-top: 2px; }
 
   /* ---------- Récolte : GPS, boutons de poids ---------- */
   .gps-pill{
@@ -762,6 +773,11 @@ function renderChoice(){
         <span>Carte des récoltes</span>
         <span class="consult-chevron">›</span>
       </button>
+      <button class="consult-link" id="choiceConsultationPoids">
+        <span class="consult-icon">⚖️</span>
+        <span>Consulter les poids après récolte</span>
+        <span class="consult-chevron">›</span>
+      </button>
     </main>
   `;
   document.getElementById("choiceArrosage").addEventListener("click", renderSelect);
@@ -772,6 +788,7 @@ function renderChoice(){
   document.getElementById("choiceRecolte").addEventListener("click", renderRecolteParcelles);
   document.getElementById("choicePoids").addEventListener("click", renderPoidsParcelles);
   document.getElementById("choiceCarte").addEventListener("click", () => renderCarteRecoltes(renderChoice));
+  document.getElementById("choiceConsultationPoids").addEventListener("click", renderConsultationPoids);
 }
 
 /* ============================================================
@@ -1447,7 +1464,7 @@ function arrondiHeures(n){
 /* ============================================================
    RÉCOLTE — pointage (appui long 3 s), poids après récolte, carte
    ============================================================ */
-const RECOLTE_PARCELLES = ["La Fontaine", "La Baume", "Bousquet et Riou", "Les Pilles"];
+const RECOLTE_PARCELLES = ["La Fontaine", "La Baume", "Bousquet", "Riou", "Les Pilles"];
 const RECOLTE_POIDS = ["<10 g", "20 g", "50 g", "100 g", ">100 g"];
 const HOLD_MS = 3000; // durée d'appui pour valider une truffe
 const COULEURS_POIDS = { "<10 g": "#D9B44A", "20 g": "#E08E3C", "50 g": "#C0502D", "100 g": "#8E2C2C", ">100 g": "#5B1A3A" };
@@ -1725,7 +1742,19 @@ function renderRecolteSaisie(parcelle){
   });
 }
 
-/* ---------- Poids après récolte ---------- */
+/* ---------- Poids après récolte (récolté / brut / net vendable, en grammes) ---------- */
+const TYPES_POIDS_UI = [
+  { id: "recolte", court: "Récolté", aide: "Poids récolté" },
+  { id: "brut", court: "Brut", aide: "Poids brut (avant lavage et tri)" },
+  { id: "net", court: "Net vendable", aide: "Poids net vendable (après lavage et tri)" }
+];
+const CLES_PARCELLES = { "La Fontaine": "fontaine", "La Baume": "baume", "Bousquet": "bousquet", "Riou": "riou", "Les Pilles": "pilles" };
+let typePoidsChoisi = "recolte";
+
+function fmtN(n){ return Math.round(Number(n) || 0).toLocaleString("fr-FR"); }
+function fmtG(n){ return fmtN(n) + " g"; }
+function dateFR(iso){ const p = String(iso).split("-"); return p.length === 3 ? p[2] + "/" + p[1] + "/" + p[0] : iso; }
+
 function renderPoidsParcelles(){
   stopGps();
   app.innerHTML = `
@@ -1747,7 +1776,19 @@ function renderPoidsParcelles(){
   });
 }
 
-let totalPeseesConnu = null;
+// Détail d'une ligne (une date) : une ligne de texte par parcelle ayant des poids
+function detailPoidsHTML(r, parcelles){
+  const lignes = (parcelles || []).filter(p => r.v && r.v[p.key]).map(p => {
+    const v = r.v[p.key], m = [];
+    if(v.recolte) m.push("récolté " + fmtN(v.recolte));
+    if(v.brut) m.push("brut " + fmtN(v.brut));
+    if(v.net) m.push("net " + fmtN(v.net));
+    return "<b>" + escapeHtml(p.label) + "</b> : " + m.join(" · ");
+  });
+  return lignes.length ? lignes.join("<br>") : "&nbsp;";
+}
+
+let signaturePeseesConnue = null;
 function rendreListePesees(d){
   const box = document.getElementById("recentPesees");
   if(!box) return;
@@ -1756,17 +1797,17 @@ function rendreListePesees(d){
     <div class="total-list">
       ${d.rows.map(r => `
         <div class="total-row recent-row">
-          <span class="t-label">${escapeHtml(r.date)} · ${escapeHtml(r.parcelle)}</span>
-          <span class="t-value">${escapeHtml(r.poids)} ${escapeHtml(r.unite || "kg")}</span>
+          <span class="t-label">${escapeHtml(r.date)}</span>
+          <span class="t-value">brut ${fmtN(r.totalBrut)} · net ${fmtN(r.totalNet)} g</span>
         </div>
-        <div class="recent-sub">${r.commentaire ? escapeHtml(r.commentaire) : "&nbsp;"}</div>
+        <div class="recent-sub">${detailPoidsHTML(r, d.parcelles)}</div>
       `).join("")}
     </div>
   `;
 }
 async function lirePesees(){
   const d = await fetchJSONP("dernieresPesees");
-  totalPeseesConnu = d.total;
+  signaturePeseesConnue = d.signature;
   return d;
 }
 
@@ -1787,9 +1828,16 @@ function renderPoidsSaisie(parcelle){
           <label>Date</label>
           <input type="date" id="v_date" value="${todayISO()}" required>
         </div>
+        <div class="field">
+          <label>Type de poids</label>
+          <div class="type-seg" id="typeSeg">
+            ${TYPES_POIDS_UI.map(t => `<button type="button" data-type="${t.id}" class="${t.id === typePoidsChoisi ? 'on' : ''}">${escapeHtml(t.court)}</button>`).join("")}
+          </div>
+          <p class="type-aide" id="typeAide"></p>
+        </div>
         <div class="field volume">
-          <label>Poids récolté <span class="unit">(kg)</span></label>
-          <input type="number" id="v_poids" class="gros-input" inputmode="decimal" step="0.001" min="0" placeholder="ex : 1.250" required>
+          <label>Poids <span class="unit">(grammes)</span></label>
+          <input type="number" id="v_poids" class="gros-input" inputmode="numeric" step="1" min="0" placeholder="ex : 1250" required>
         </div>
         <div class="field">
           <label>Commentaire <span class="unit">(facultatif)</span></label>
@@ -1799,11 +1847,19 @@ function renderPoidsSaisie(parcelle){
         <div class="status" id="poidsStatus"></div>
       </form>
 
-      <p class="section-title" style="margin-top:20px;">Dernières pesées <span class="unit">(pour contrôle)</span></p>
+      <p class="section-title" style="margin-top:20px;">Dernières dates <span class="unit">(pour contrôle)</span></p>
       <div id="recentPesees"><p class="loading-msg">Chargement…</p></div>
     </main>
   `;
   document.getElementById("backBtn").addEventListener("click", renderPoidsParcelles);
+
+  const aide = document.getElementById("typeAide");
+  function majType(){
+    app.querySelectorAll("#typeSeg button").forEach(b => b.classList.toggle("on", b.dataset.type === typePoidsChoisi));
+    aide.textContent = TYPES_POIDS_UI.find(t => t.id === typePoidsChoisi).aide;
+  }
+  app.querySelectorAll("#typeSeg button").forEach(b => b.addEventListener("click", () => { typePoidsChoisi = b.dataset.type; majType(); }));
+  majType();
 
   const statusEl = document.getElementById("poidsStatus");
   const saveBtn = document.getElementById("poidsSaveBtn");
@@ -1813,15 +1869,17 @@ function renderPoidsSaisie(parcelle){
     if(SCRIPT_URL.indexOf("COLLE_ICI") === 0){
       statusEl.textContent = "⚠️ Configure d'abord l'URL du script."; statusEl.className = "status err"; return;
     }
-    const poids = parseFloat(String(document.getElementById("v_poids").value).replace(",", "."));
+    const poids = Math.round(parseFloat(String(document.getElementById("v_poids").value).replace(",", ".")));
     if(!(poids > 0)){
-      statusEl.textContent = "⚠️ Renseigne un poids supérieur à 0."; statusEl.className = "status err"; return;
+      statusEl.textContent = "⚠️ Renseigne un poids supérieur à 0 (en grammes)."; statusEl.className = "status err"; return;
     }
+    const type = typePoidsChoisi;
+    const dateIso = document.getElementById("v_date").value;
     saveBtn.disabled = true;
     statusEl.textContent = "Enregistrement…"; statusEl.className = "status pending";
 
-    let avant = totalPeseesConnu;
-    if(avant === null){ try{ avant = (await lirePesees()).total; }catch(e){ avant = null; } }
+    let avant = signaturePeseesConnue;
+    if(avant === null){ try{ avant = (await lirePesees()).signature; }catch(e){ avant = null; } }
 
     try{
       await fetch(SCRIPT_URL, {
@@ -1830,8 +1888,9 @@ function renderPoidsSaisie(parcelle){
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify({
           mode: "recolteVolume",
-          date: document.getElementById("v_date").value,
+          date: dateIso,
           parcelle: parcelle,
+          type: type,
           poids: poids,
           commentaire: document.getElementById("v_comment").value.trim()
         })
@@ -1843,23 +1902,28 @@ function renderPoidsSaisie(parcelle){
       return;
     }
 
+    // CONFIRMATION : la somme de tous les poids du Sheet doit avoir augmenté.
     let conf = null;
     for(let i = 0; i < 4 && !conf; i++){
       await attendre(i === 0 ? 500 : 900);
       try{
         const d = await lirePesees();
         rendreListePesees(d);
-        if(avant !== null && d.total > avant) conf = d;
+        if(avant !== null && d.signature > avant) conf = d;
       }catch(e){ /* nouvelle tentative */ }
     }
     if(conf){
-      statusEl.textContent = "✓ Pesée enregistrée dans le Sheet : " + poids + " kg — " + parcelle;
+      const info = TYPES_POIDS_UI.find(t => t.id === type);
+      const ligne = (conf.rows || []).find(r => r.date === dateFR(dateIso));
+      const v = ligne && ligne.v && ligne.v[CLES_PARCELLES[parcelle]];
+      const cumul = v && v[type] ? " — cumul du jour : " + fmtG(v[type]) : "";
+      statusEl.textContent = "✓ " + info.aide + " enregistré dans le Sheet : " + fmtG(poids) + " (" + parcelle + ")" + cumul;
       statusEl.className = "status ok";
       document.getElementById("v_poids").value = "";
       document.getElementById("v_comment").value = "";
       vibrer([80, 60, 160]);
     } else {
-      statusEl.textContent = "Envoyée, mais non confirmée par le Sheet — vérifie la liste ci-dessous.";
+      statusEl.textContent = "Envoyée, mais non confirmée par le Sheet — vérifie la liste ci-dessous (ou lance « verifierOngletVolume » dans le script).";
       statusEl.className = "status err";
     }
     saveBtn.disabled = false;
@@ -1867,8 +1931,66 @@ function renderPoidsSaisie(parcelle){
 
   lirePesees().then(rendreListePesees).catch(() => {
     const box = document.getElementById("recentPesees");
-    if(box) box.innerHTML = `<p class="error-msg">✗ Impossible de charger les dernières pesées.</p>`;
+    if(box) box.innerHTML = `<p class="error-msg">✗ Impossible de charger les dernières dates.</p>`;
   });
+}
+
+/* ---------- Consultation : tableau des poids après récolte ---------- */
+async function renderConsultationPoids(){
+  app.innerHTML = `
+    <header class="compact">
+      <div class="back-row">
+        <button class="back-btn" id="backBtn">‹</button>
+      </div>
+      <h1>Poids après récolte</h1>
+    </header>
+    <main class="compact">
+      <div id="poidsConsultBody"><p class="loading-msg">Chargement…</p></div>
+    </main>
+  `;
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
+  const body = document.getElementById("poidsConsultBody");
+  let t;
+  try{
+    t = await fetchJSONP("tableauPoids");
+  }catch(err){
+    body.innerHTML = `<p class="error-msg">✗ Impossible de charger le tableau — vérifie ta connexion et réessaie.</p>`;
+    return;
+  }
+  if(!t.rows || t.rows.length === 0){
+    body.innerHTML = `<p class="loading-msg">Aucune pesée enregistrée pour le moment.</p>`;
+    return;
+  }
+  const lignesParcelles = (t.parcelles || []).map(p => {
+    const x = (t.totaux && t.totaux[p.key]) || { recolte: 0, brut: 0, net: 0 };
+    return `<tr><td>${escapeHtml(p.label)}</td><td>${fmtN(x.recolte)}</td><td>${fmtN(x.brut)}</td><td>${fmtN(x.net)}</td></tr>`;
+  }).join("");
+  body.innerHTML = `
+    <div class="gros-totaux">
+      <div class="gt"><span class="gt-label">Total brut</span><span class="gt-val">${fmtG(t.totalBrut)}</span></div>
+      <div class="gt"><span class="gt-label">Total net vendable</span><span class="gt-val">${fmtG(t.totalNet)}</span></div>
+    </div>
+
+    <p class="section-title">Totaux par parcelle <span class="unit">(grammes)</span></p>
+    <table class="bilan-table" style="margin-bottom:18px;">
+      <thead><tr><th>Parcelle</th><th>Récolté</th><th>Brut</th><th>Net</th></tr></thead>
+      <tbody>
+        ${lignesParcelles}
+        <tr><td>TOTAL</td><td>${fmtN(t.totalRecolte)}</td><td>${fmtN(t.totalBrut)}</td><td>${fmtN(t.totalNet)}</td></tr>
+      </tbody>
+    </table>
+
+    <p class="section-title">Détail par date</p>
+    <div class="total-list">
+      ${t.rows.map(r => `
+        <div class="total-row recent-row">
+          <span class="t-label">${escapeHtml(r.date)}</span>
+          <span class="t-value">brut ${fmtN(r.totalBrut)} · net ${fmtN(r.totalNet)} g</span>
+        </div>
+        <div class="recent-sub">${detailPoidsHTML(r, t.parcelles)}</div>
+      `).join("")}
+    </div>
+  `;
 }
 
 /* ---------- Carte des récoltes : points en direct (IGN : photos aériennes + cadastre) ---------- */

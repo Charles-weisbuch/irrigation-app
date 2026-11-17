@@ -161,7 +161,8 @@ function doGet(e) {
   var actionsRecolte = {
     dernieresRecoltes: obtenirDernieresRecoltes,
     pointsRecolte: obtenirPointsRecolte,
-    dernieresPesees: obtenirDernieresPesees
+    dernieresPesees: obtenirDernieresPesees,
+    tableauPoids: obtenirTableauPoids
   };
   if (actionsRecolte[action]) {
     var json5 = JSON.stringify(actionsRecolte[action]());
@@ -530,7 +531,7 @@ var RECOLTE_COL_COMMENT = 8;  // H
 var RECOLTE_COL_LAT = 9;      // I
 var RECOLTE_COL_LON = 10;     // J
 var RECOLTE_NB_COLS = 10;     // A à J (pour le décalage chronologique)
-var RECOLTE_PARCELLES = ["La Fontaine", "La Baume", "Bousquet et Riou", "Les Pilles"];
+var RECOLTE_PARCELLES = ["La Fontaine", "La Baume", "Bousquet", "Riou", "Les Pilles"];
 var RECOLTE_POIDS = ["<10 g", "20 g", "50 g", "100 g", ">100 g"];
 var VOLUME_SHEET = "Récolte volume";
 
@@ -674,43 +675,139 @@ function obtenirPointsRecolte() {
 }
 
 /* ---------- Poids après récolte : onglet "Récolte volume" ---------- */
-// Repère les colonnes de l'onglet d'après ses en-têtes (Date, Parcelle, Poids, Commentaires),
-// où qu'elles soient placées. Si l'onglet n'existe pas (ou est vide) et que creer = true, il
-// est créé avec : Date | Parcelle | Poids (kg) | Commentaires (en-têtes en ligne 2).
-// L'unité est lue dans l'en-tête du poids : « kg » (défaut) ou « g ».
+// Structure attendue : une ligne par DATE ; colonne « Date » ; puis, pour chaque parcelle, un
+// groupe de colonnes (Poids récolté | Poids brut | Poids net vendable) ; puis des colonnes de
+// total (Total brut, Total net vendable…). Les colonnes sont repérées d'après les EN-TÊTES (nom
+// de la parcelle au-dessus, intitulé du poids en dessous — cellules fusionnées acceptées), pas
+// d'après leur position : on peut les déplacer. Utiliser « verifierOngletVolume » pour voir
+// comment les en-têtes sont interprétés avant de saisir quoi que ce soit.
+var PARCELLES_VOLUME = [
+  { key: "fontaine", label: "La Fontaine", re: /fontaine/ },
+  { key: "baume", label: "La Baume", re: /baume/ },
+  { key: "bousquet", label: "Bousquet", re: /bousquet/ },
+  { key: "riou", label: "Riou", re: /riou/ },
+  { key: "pilles", label: "Les Pilles", re: /pilles/ }
+];
+var TYPES_POIDS = ["recolte", "brut", "net"];
+var LIBELLES_TYPES = { recolte: "récolté", brut: "brut", net: "net vendable" };
+
+function cleParcelleTexte(texte) {
+  var t = normTxt(texte), trouvees = [];
+  PARCELLES_VOLUME.forEach(function (p) { if (p.re.test(t)) trouvees.push(p.key); });
+  return trouvees.length === 1 ? trouvees[0] : null; // 0 ou 2 parcelles dans le texte : non exploitable
+}
+function cleParcelleLabel(label) {
+  var k = null;
+  PARCELLES_VOLUME.forEach(function (p) { if (p.label === label) k = p.key; });
+  return k;
+}
+function sousTypeTexte(t) {
+  if (/\bbrut\b/.test(t)) return "brut";
+  if (/\bnet\b|vendable/.test(t)) return "net";
+  if (/recolt|poids|volume/.test(t)) return "recolte";
+  return null;
+}
+function jourStr(d, tz) { return Utilities.formatDate(d, tz, "yyyy-MM-dd"); }
+
+// Lit les en-têtes de l'onglet et renvoie { dateCol, startRow, groups, totals, units, ... }
+function analyserOngletVolume(sheet) {
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  var nbRows = Math.min(10, Math.max(sheet.getMaxRows(), 1));
+  var vals = sheet.getRange(1, 1, nbRows, lastCol).getValues();
+
+  var dateCol = 0, dateRow = 0, r, c;
+  for (r = 0; r < nbRows && !dateCol; r++) {
+    for (c = 0; c < lastCol && !dateCol; c++) {
+      if (typeof vals[r][c] === "string" && /^date/.test(normTxt(vals[r][c]))) { dateCol = c + 1; dateRow = r + 1; }
+    }
+  }
+  if (!dateCol) return { error: "Onglet '" + VOLUME_SHEET + "' : en-tête « Date » introuvable dans les 10 premières lignes." };
+
+  // dernière ligne d'en-têtes = dernière ligne (avant les données) qui contient un intitulé
+  var lastHeaderRow = dateRow;
+  for (r = dateRow; r < nbRows; r++) {
+    if (vals[r][dateCol - 1] instanceof Date) break;
+    var aIntitule = vals[r].some(function (v) {
+      var t = normTxt(v);
+      return t && (/brut|\bnet\b|vendable|recolt|poids|total|date/.test(t) || cleParcelleTexte(t));
+    });
+    if (aIntitule) lastHeaderRow = r + 1;
+  }
+
+  // groupe (parcelle) de chaque colonne : le nom est au-dessus, sur la 1re colonne du groupe
+  var groupAt = [];
+  for (c = 0; c < lastCol; c++) groupAt[c] = null;
+  for (r = 0; r < lastHeaderRow; r++) {
+    var cur = null;
+    for (c = 0; c < lastCol; c++) {
+      var t = normTxt(vals[r][c]);
+      if (t) cur = /total/.test(t) ? null : cleParcelleTexte(t);
+      if (cur && !groupAt[c]) groupAt[c] = cur;
+    }
+  }
+
+  var groups = {}, totals = {}, units = {}, commentCol = 0, dernierCol = dateCol, doublon = null;
+  var colsDuGroupe = {};
+  for (c = 0; c < lastCol; c++) {
+    var label = "";
+    for (r = 0; r < lastHeaderRow; r++) label += " " + normTxt(vals[r][c]);
+    label = label.trim();
+    if (!label) continue;
+    units[c + 1] = /\bkg\b|kilo/.test(label) ? "kg" : "g";
+    if (/commentaire|remarque/.test(label)) { commentCol = c + 1; dernierCol = Math.max(dernierCol, c + 1); continue; }
+    var sub = sousTypeTexte(label);
+    if (/total/.test(label)) {
+      if (sub && !totals[sub]) { totals[sub] = c + 1; dernierCol = Math.max(dernierCol, c + 1); }
+      continue;
+    }
+    var g = groupAt[c];
+    if (!g) continue;
+    dernierCol = Math.max(dernierCol, c + 1);
+    (colsDuGroupe[g] = colsDuGroupe[g] || []).push(c + 1);
+    if (sub) {
+      groups[g] = groups[g] || {};
+      if (groups[g][sub]) doublon = "Parcelle « " + g + " » : deux colonnes « " + LIBELLES_TYPES[sub] + " ».";
+      else groups[g][sub] = c + 1;
+    }
+  }
+  // repli : un groupe de 3 colonnes sans intitulés reconnus = récolté | brut | net, dans cet ordre
+  Object.keys(colsDuGroupe).forEach(function (g) {
+    if (!groups[g] && colsDuGroupe[g].length === 3) {
+      groups[g] = { recolte: colsDuGroupe[g][0], brut: colsDuGroupe[g][1], net: colsDuGroupe[g][2] };
+    }
+  });
+  if (doublon) return { error: doublon };
+
+  var ordre = Object.keys(colsDuGroupe).sort(function (a, b) { return colsDuGroupe[a][0] - colsDuGroupe[b][0]; });
+  return {
+    dateCol: dateCol, headerRow: lastHeaderRow, startRow: lastHeaderRow + 1, groups: groups, totals: totals,
+    units: units, commentCol: commentCol, dernierCol: dernierCol, ordre: ordre
+  };
+}
+
+// Onglet + analyse. Si l'onglet n'existe pas et creer = true, il est créé avec la structure
+// décrite ci-dessus (en-têtes sur 2 lignes, 5 parcelles, totaux brut / net vendable).
 function infosOngletVolume(creer) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = trouverOngletSouple(ss, VOLUME_SHEET);
   if (!sheet) {
     if (!creer) return null;
     sheet = ss.insertSheet(VOLUME_SHEET);
+    var ligne1 = ["Date"], ligne2 = [""];
+    PARCELLES_VOLUME.forEach(function (p) {
+      ligne1.push(p.label, "", "");
+      ligne2.push("Poids récolté (g)", "Poids brut (g)", "Poids net vendable (g)");
+    });
+    ligne1.push("Total brut (g)", "Total net vendable (g)");
+    ligne2.push("", "");
+    sheet.getRange(1, 1, 1, ligne1.length).setValues([ligne1]);
+    sheet.getRange(2, 1, 1, ligne2.length).setValues([ligne2]);
+    sheet.getRange(1, 1, 2, ligne1.length).setBackground("#D9D9D9").setFontWeight("bold");
   }
-  var info = null;
-  if (sheet.getLastRow() > 0) {
-    var nbRows = Math.min(8, sheet.getLastRow());
-    var vals = sheet.getRange(1, 1, nbRows, Math.max(sheet.getLastColumn(), 1)).getValues();
-    for (var r = 0; r < vals.length && !info; r++) {
-      var cols = {}, unit = "kg";
-      for (var c = 0; c < vals[r].length; c++) {
-        var t = normTxt(vals[r][c]);
-        if (!t) continue;
-        if (!cols.date && /^date/.test(t)) cols.date = c + 1;
-        else if (!cols.parcelle && /parcelle/.test(t)) cols.parcelle = c + 1;
-        else if (!cols.poids && /poids|volume|kg/.test(t)) {
-          cols.poids = c + 1;
-          unit = (/\bkg\b|kilo/.test(t)) ? "kg" : ((/\(g\)|\bg\b|gramme/.test(t)) ? "g" : "kg");
-        }
-        else if (!cols.comment && /commentaire|remarque|note/.test(t)) cols.comment = c + 1;
-      }
-      if (cols.date && cols.poids) info = { headerRow: r + 1, cols: cols, unit: unit };
-    }
-  } else if (creer) {
-    sheet.getRange(2, 1, 1, 4).setValues([["Date", "Parcelle", "Poids (kg)", "Commentaires"]]).setBackground("#D9D9D9");
-    info = { headerRow: 2, cols: { date: 1, parcelle: 2, poids: 3, comment: 4 }, unit: "kg" };
-  }
-  if (!info) return creer ? { error: "Onglet '" + VOLUME_SHEET + "' : en-têtes Date / Poids introuvables dans les 8 premières lignes." } : null;
+  var info = analyserOngletVolume(sheet);
+  if (info.error) return creer ? info : null;
   info.sheet = sheet;
-  info.startRow = info.headerRow + 1;
+  info.tz = ss.getSpreadsheetTimeZone();
   return info;
 }
 
@@ -718,55 +815,167 @@ function handleRecolteVolume(data) {
   var info = infosOngletVolume(true);
   if (info.error) return jsonOutput({ ok: false, error: info.error });
 
-  if (RECOLTE_PARCELLES.indexOf(data.parcelle) === -1) return jsonOutput({ ok: false, error: "Parcelle inconnue : " + data.parcelle });
-  var poids = Number(data.poids);
-  if (!isFinite(poids) || poids <= 0) return jsonOutput({ ok: false, error: "Poids invalide." });
+  var key = cleParcelleLabel(data.parcelle);
+  if (!key) return jsonOutput({ ok: false, error: "Parcelle inconnue : " + data.parcelle });
+  if (TYPES_POIDS.indexOf(data.type) === -1) return jsonOutput({ ok: false, error: "Type de poids inconnu : " + data.type });
+  var grp = info.groups[key];
+  if (!grp || !grp[data.type]) {
+    return jsonOutput({ ok: false, error: "Colonne « poids " + LIBELLES_TYPES[data.type] + " » introuvable pour " + data.parcelle + " (voir verifierOngletVolume)." });
+  }
+  var grammes = Number(data.poids);
+  if (!isFinite(grammes) || grammes <= 0) return jsonOutput({ ok: false, error: "Poids invalide." });
   if (!data.date) return jsonOutput({ ok: false, error: "Date manquante." });
-  var dateValue = parseDateOnly(data.date);
 
-  var sheet = info.sheet, cols = info.cols, start = info.startRow;
+  var sheet = info.sheet, tz = info.tz, start = info.startRow;
+  var jour = jourStr(parseDateOnly(data.date), tz);
   var NB_MAX = 3000;
-  var dates = lireBlocBorne(sheet, start, cols.date, 1, NB_MAX).map(function (row) { return row[0]; });
-  var nextFree = premiereLigneLibre(sheet, start, dates, NB_MAX);
-  if (nextFree === -1) return jsonOutput({ ok: false, error: "Tableau plein." });
+  var bloc = lireBlocBorne(sheet, start, 1, info.dernierCol, NB_MAX);
 
-  var insertion = nextFree;
-  for (var k = 0; k < nextFree - start && k < dates.length; k++) {
-    if (dates[k] instanceof Date && dateValue.getTime() < dates[k].getTime()) { insertion = start + k; break; }
+  // Une ligne par date : on cherche d'abord la ligne de ce jour ; sinon la place chronologique.
+  var rowSame = -1, insertion = -1, nextFree = -1;
+  for (var i = 0; i < bloc.length; i++) {
+    var d = bloc[i][info.dateCol - 1];
+    if (d === "" || d === null) { nextFree = start + i; break; }
+    if (d instanceof Date) {
+      var j = jourStr(d, tz);
+      if (j === jour && rowSame === -1) rowSame = start + i;
+      if (j > jour && insertion === -1) insertion = start + i;
+    }
   }
-  if (insertion < nextFree) {
-    var colonnes = [cols.date, cols.poids, cols.parcelle || cols.date, cols.comment || cols.date];
-    var minCol = Math.min.apply(null, colonnes), maxCol = Math.max.apply(null, colonnes);
-    shiftBlockRowsDown(sheet, minCol, maxCol - minCol + 1, insertion, nextFree);
+  var target;
+  if (rowSame !== -1) {
+    target = rowSame;
+  } else {
+    if (nextFree === -1) {
+      if (bloc.length < NB_MAX) { sheet.insertRowsAfter(sheet.getMaxRows(), 200); nextFree = start + bloc.length; }
+      else return jsonOutput({ ok: false, error: "Tableau plein." });
+    }
+    target = insertion !== -1 ? insertion : nextFree;
+    if (insertion !== -1) shiftBlockRowsDown(sheet, 1, info.dernierCol, insertion, nextFree);
+    sheet.getRange(target, info.dateCol).setValue(parseDateOnly(data.date)).setNumberFormat(FORMAT_DATE);
   }
 
-  sheet.getRange(insertion, cols.date).setValue(dateValue).setNumberFormat(FORMAT_DATE);
-  if (cols.parcelle) sheet.getRange(insertion, cols.parcelle).setValue(data.parcelle);
-  sheet.getRange(insertion, cols.poids).setValue(info.unit === "g" ? Math.round(poids * 1000) : Math.round(poids * 1000) / 1000);
-  if (cols.comment) sheet.getRange(insertion, cols.comment).setValue((data.commentaire || "").toString().trim());
+  // Poids : plusieurs saisies de la même parcelle / même type le même jour se CUMULENT.
+  var col = grp[data.type], unite = info.units[col] || "g";
+  var cellule = sheet.getRange(target, col);
+  var avant = cellule.getValue();
+  var ajout = unite === "kg" ? grammes / 1000 : grammes;
+  var cumul = (typeof avant === "number" ? avant : 0) + ajout;
+  cellule.setValue(unite === "kg" ? Math.round(cumul * 1000) / 1000 : Math.round(cumul));
 
-  return jsonOutput({ ok: true, row: insertion });
+  var commentaire = (data.commentaire || "").toString().trim();
+  if (commentaire) {
+    if (info.commentCol) {
+      var cc = sheet.getRange(target, info.commentCol), ancien = (cc.getValue() || "").toString();
+      cc.setValue(ancien ? ancien + " ; " + commentaire : commentaire);
+    } else {
+      var ancienneNote = cellule.getNote() || "";
+      cellule.setNote((ancienneNote ? ancienneNote + "\n" : "") + commentaire); // pas de colonne commentaire : note sur la cellule
+    }
+  }
+
+  // Totaux : formules dans les colonnes « Total … » de la ligne saisie, et des lignes qui ont
+  // été décalées d'un cran vers le bas (leurs formules sont réécrites, sans dépendre de la
+  // façon dont la copie ajuste les références).
+  ecrireTotauxLigne(sheet, info, target);
+  if (rowSame === -1 && insertion !== -1) {
+    for (var rr = insertion + 1; rr <= nextFree; rr++) ecrireTotauxLigne(sheet, info, rr);
+  }
+
+  return jsonOutput({ ok: true, row: target, cumul: cumul });
+}
+// Total brut / net / récolté d'une ligne = somme des cellules correspondantes de toutes les parcelles.
+function ecrireTotauxLigne(sheet, info, row) {
+  Object.keys(info.totals).forEach(function (type) {
+    var refs = [];
+    info.ordre.forEach(function (g) {
+      if (info.groups[g] && info.groups[g][type]) refs.push(columnToLetter(info.groups[g][type]) + row);
+    });
+    if (refs.length) sheet.getRange(row, info.totals[type]).setFormula("=" + refs.join("+"));
+  });
 }
 
+// Lit tout le tableau et le met en forme pour l'appli (poids toujours en grammes).
+function lireTableauPoids(info) {
+  var sheet = info.sheet, tz = info.tz;
+  var vals = lireBlocBorne(sheet, info.startRow, 1, info.dernierCol, 3000);
+  function enG(v, col) {
+    var n = Number(v);
+    if (!isFinite(n) || v === "" || v === null) return 0;
+    return (info.units[col] === "kg") ? Math.round(n * 1000) : n;
+  }
+  var parcelles = info.ordre.filter(function (g) { return info.groups[g]; }).map(function (g) {
+    var label = g;
+    PARCELLES_VOLUME.forEach(function (p) { if (p.key === g) label = p.label; });
+    return { key: g, label: label };
+  });
+  var rows = [], totaux = {}, totalBrut = 0, totalNet = 0, totalRecolte = 0, signature = 0;
+  parcelles.forEach(function (p) { totaux[p.key] = { recolte: 0, brut: 0, net: 0 }; });
+
+  for (var i = 0; i < vals.length; i++) {
+    var d = vals[i][info.dateCol - 1];
+    if (d === "" || d === null) break;
+    var ligne = { date: d instanceof Date ? formatDateFR(d) : d, v: {}, totalBrut: 0, totalNet: 0 };
+    parcelles.forEach(function (p) {
+      var grp = info.groups[p.key], o = {}, aDesDonnees = false;
+      TYPES_POIDS.forEach(function (t) {
+        var g = grp[t] ? enG(vals[i][grp[t] - 1], grp[t]) : 0;
+        o[t] = g;
+        if (g) aDesDonnees = true;
+        totaux[p.key][t] += g;
+        signature += g;
+      });
+      if (aDesDonnees) ligne.v[p.key] = o;
+      ligne.totalBrut += o.brut;
+      ligne.totalNet += o.net;
+    });
+    totalBrut += ligne.totalBrut; totalNet += ligne.totalNet;
+    parcelles.forEach(function (p) { totalRecolte += (ligne.v[p.key] ? ligne.v[p.key].recolte : 0); });
+    rows.push(ligne);
+  }
+  return { unite: "g", parcelles: parcelles, rows: rows, totaux: totaux, totalBrut: totalBrut, totalNet: totalNet, totalRecolte: totalRecolte, signature: signature };
+}
+
+// Écran de contrôle : les 5 dernières dates + une « signature » (somme de tous les poids) que
+// l'appli compare avant / après pour CONFIRMER qu'une saisie est bien arrivée dans le Sheet.
 function obtenirDernieresPesees() {
   var info = infosOngletVolume(false);
-  if (!info || info.error) return { total: 0, rows: [] };
-  var sheet = info.sheet, cols = info.cols;
-  var largeur = Math.max(cols.date, cols.poids, cols.parcelle || 1, cols.comment || 1);
-  var vals = lireBlocBorne(sheet, info.startRow, 1, largeur, 3000);
+  if (!info) return { signature: 0, parcelles: [], rows: [] };
+  var t = lireTableauPoids(info);
+  return { signature: t.signature, parcelles: t.parcelles, rows: t.rows.slice(-5).reverse() };
+}
+
+// Tableau complet pour l'écran de consultation.
+function obtenirTableauPoids() {
+  var info = infosOngletVolume(false);
+  if (!info) return { unite: "g", parcelles: [], rows: [], totaux: {}, totalBrut: 0, totalNet: 0, totalRecolte: 0, signature: 0 };
+  var t = lireTableauPoids(info);
+  t.rows = t.rows.slice().reverse(); // la plus récente en premier
+  return t;
+}
+
+// À exécuter pour vérifier, SANS rien écrire, comment les en-têtes de « Récolte volume » sont
+// interprétés (colonnes de chaque parcelle, colonnes de total, unités).
+function verifierOngletVolume() {
+  var info = infosOngletVolume(false);
   var lignes = [];
-  for (var i = 0; i < vals.length; i++) {
-    var d = vals[i][cols.date - 1];
-    if (d === "" || d === null) break;
-    lignes.push({
-      date: d instanceof Date ? formatDateFR(d) : d,
-      parcelle: cols.parcelle ? (vals[i][cols.parcelle - 1] || "") : "",
-      poids: vals[i][cols.poids - 1],
-      unite: info.unit,
-      commentaire: cols.comment ? (vals[i][cols.comment - 1] || "") : ""
+  if (!info) {
+    lignes.push("Onglet '" + VOLUME_SHEET + "' introuvable (il sera créé à la première saisie) ou en-têtes non reconnus.");
+    var sh = trouverOngletSouple(SpreadsheetApp.getActiveSpreadsheet(), VOLUME_SHEET);
+    if (sh) { var a = analyserOngletVolume(sh); if (a.error) lignes.push("Détail : " + a.error); }
+  } else {
+    lignes.push("Colonne Date : " + columnToLetter(info.dateCol) + " — données à partir de la ligne " + info.startRow);
+    PARCELLES_VOLUME.forEach(function (p) {
+      var g = info.groups[p.key];
+      if (!g) { lignes.push("⚠ " + p.label + " : AUCUN groupe de colonnes reconnu"); return; }
+      lignes.push(p.label + " : récolté=" + (g.recolte ? columnToLetter(g.recolte) : "—") + " · brut=" + (g.brut ? columnToLetter(g.brut) : "—") + " · net=" + (g.net ? columnToLetter(g.net) : "—") + " (unité " + (info.units[g.recolte || g.brut || g.net] || "g") + ")");
     });
+    TYPES_POIDS.forEach(function (t) { if (info.totals[t]) lignes.push("Total " + LIBELLES_TYPES[t] + " : colonne " + columnToLetter(info.totals[t])); });
+    if (!info.totals.brut || !info.totals.net) lignes.push("⚠ Colonne de total brut et/ou net non reconnue (en-tête contenant « total » + « brut » / « net »).");
+    lignes.push(info.commentCol ? "Commentaires : colonne " + columnToLetter(info.commentCol) : "Pas de colonne Commentaires : le commentaire est mis en note sur la cellule du poids.");
   }
-  return { total: lignes.length, rows: lignes.slice(-5).reverse() };
+  Logger.log(lignes.join("\n"));
+  return lignes;
 }
 
 /* ---------- Nettoyage ponctuel : effacer une ligne de test du journal Heures ---------- */
