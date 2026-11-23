@@ -107,6 +107,9 @@ function doPost(e) {
     if (data.mode === "recolteVolume") {
       return handleRecolteVolume(data);
     }
+    if (data.mode === "vente") {
+      return handleVente(data);
+    }
     return handleArrosage(data);
   } catch (err) {
     return jsonOutput({ ok: false, error: err.message });
@@ -162,7 +165,9 @@ function doGet(e) {
     dernieresRecoltes: obtenirDernieresRecoltes,
     pointsRecolte: obtenirPointsRecolte,
     dernieresPesees: obtenirDernieresPesees,
-    tableauPoids: obtenirTableauPoids
+    tableauPoids: obtenirTableauPoids,
+    dernieresVentes: obtenirDernieresVentes,
+    tableauVente: obtenirTableauVente
   };
   if (actionsRecolte[action]) {
     var json5 = JSON.stringify(actionsRecolte[action]());
@@ -680,11 +685,14 @@ function obtenirPointsRecolte() {
 }
 
 /* ---------- Poids après récolte : onglet "Récolte volume" ---------- */
-// Mise en page : une ligne par DATE ; colonne « Date » ; puis, pour chaque parcelle, un groupe
-// de 3 colonnes [poids brut | poids net vendable | commentaire] sous le nom de la parcelle
-// (cellules fusionnées) ; puis « Total poids brut », « Total poids net vendable » et « % de
-// perte ». Les colonnes sont repérées d'après les EN-TÊTES, pas d'après leur position : on peut
-// les déplacer. « verifierOngletVolume » montre comment les en-têtes sont lus (rien n'est écrit).
+// Mise en page : une ligne par DATE ; colonne « Date » ; puis, pour chaque parcelle, un groupe de
+// colonnes [poids brut non lavé | poids lavé non trié | poids net vendable | commentaire] sous le
+// nom de la parcelle (cellules fusionnées) ; puis, à droite, les colonnes de total par ligne :
+// « Total poids brut », « Total lavé non trié », « Total poids net vendable » et « % de perte »
+// (= 1 − net vendable / lavé non trié). Au-dessus des en-têtes (ligne 1), les TOTAUX / MOYENNE de
+// chaque colonne de total, sur TOUTE la colonne (de la 1re saisie jusqu'en bas, nouvelles saisies
+// comprises). Les colonnes sont repérées d'après les EN-TÊTES, pas d'après leur position.
+// « verifierOngletVolume » montre comment les en-têtes sont lus (rien n'est écrit).
 var PARCELLES_VOLUME = [
   { key: "fontaine", label: "La Fontaine", re: /fontaine/ },
   { key: "baume", label: "La Baume", re: /baume/ },
@@ -692,8 +700,9 @@ var PARCELLES_VOLUME = [
   { key: "riou", label: "Riou", re: /riou/ },
   { key: "pilles", label: "Les Pilles", re: /pilles/ }
 ];
-var TYPES_POIDS = ["brut", "net"];
-var LIBELLES_TYPES = { brut: "brut", net: "net vendable" };
+var TYPES_POIDS = ["brut", "lave", "net"];
+var LIBELLES_TYPES = { brut: "brut non lavé", lave: "lavé non trié", net: "net vendable" };
+var NB_MAX_LIGNES = 3000;
 
 function cleParcelleTexte(texte) {
   var t = normTxt(texte), trouvees = [];
@@ -705,23 +714,28 @@ function cleParcelleLabel(label) {
   PARCELLES_VOLUME.forEach(function (p) { if (p.label === label) k = p.key; });
   return k;
 }
+// Type de poids d'après un en-tête (déjà passé par normTxt : minuscules, sans accents).
+// L'ordre compte : « net vendable (lavé et trié) » contient « lavé », « brut non lavé » aussi.
 function sousTypeTexte(t) {
-  if (/\bbrut\b/.test(t)) return "brut";
   if (/\bnet\b|vendable/.test(t)) return "net";
+  if (/\bbrut\b/.test(t)) return "brut";
+  if (/\blave\b/.test(t)) return "lave";
   return null;
 }
 function jourStr(d, tz) { return Utilities.formatDate(d, tz, "yyyy-MM-dd"); }
 
-// Lit les en-têtes de l'onglet et renvoie { dateCol, startRow, groups, totals, units, ... }
+// Lit les en-têtes de l'onglet et renvoie { dateCol, startRow, groups, totals, perteCol, totalsRow, ... }
 function analyserOngletVolume(sheet) {
   var lastCol = Math.max(sheet.getLastColumn(), 1);
   var nbRows = Math.min(10, Math.max(sheet.getMaxRows(), 1));
   var vals = sheet.getRange(1, 1, nbRows, lastCol).getValues();
+  // on ne garde que le TEXTE des en-têtes (les totaux chiffrés de la ligne 1 n'en font pas partie)
+  function txt(r, c) { return typeof vals[r][c] === "string" ? normTxt(vals[r][c]) : ""; }
 
   var dateCol = 0, dateRow = 0, r, c;
   for (r = 0; r < nbRows && !dateCol; r++) {
     for (c = 0; c < lastCol && !dateCol; c++) {
-      if (typeof vals[r][c] === "string" && /^date/.test(normTxt(vals[r][c]))) { dateCol = c + 1; dateRow = r + 1; }
+      if (/^date/.test(txt(r, c))) { dateCol = c + 1; dateRow = r + 1; }
     }
   }
   if (!dateCol) return { error: "Onglet '" + VOLUME_SHEET + "' : en-tête « Date » introuvable dans les 10 premières lignes." };
@@ -730,30 +744,35 @@ function analyserOngletVolume(sheet) {
   var lastHeaderRow = dateRow;
   for (r = dateRow; r < nbRows; r++) {
     if (vals[r][dateCol - 1] instanceof Date) break;
-    var aIntitule = vals[r].some(function (v) {
-      var t = normTxt(v);
-      return t && (/brut|\bnet\b|vendable|poids|total|commentaire|date/.test(t) || cleParcelleTexte(t));
-    });
+    var aIntitule = false;
+    for (c = 0; c < lastCol; c++) {
+      var t0 = txt(r, c);
+      if (t0 && (/brut|\bnet\b|vendable|poids|total|commentaire|date|lave/.test(t0) || cleParcelleTexte(t0))) aIntitule = true;
+    }
     if (aIntitule) lastHeaderRow = r + 1;
   }
 
   // groupe (parcelle) de chaque colonne : le nom est au-dessus, sur la 1re colonne du groupe
   // (cellule fusionnée : les colonnes suivantes sont vides et héritent du groupe)
-  var groupAt = [];
+  var groupAt = [], topGroupRow = 0;
   for (c = 0; c < lastCol; c++) groupAt[c] = null;
   for (r = 0; r < lastHeaderRow; r++) {
     var cur = null;
     for (c = 0; c < lastCol; c++) {
-      var t = normTxt(vals[r][c]);
-      if (t) cur = /total/.test(t) ? null : cleParcelleTexte(t);
+      var t = txt(r, c);
+      if (t) {
+        cur = /total/.test(t) ? null : cleParcelleTexte(t);
+        if (cur && (!topGroupRow || r + 1 < topGroupRow)) topGroupRow = r + 1;
+      }
       if (cur && !groupAt[c]) groupAt[c] = cur;
     }
   }
 
-  var groups = {}, totals = {}, units = {}, commentCols = {}, commentCol = 0, dernierCol = dateCol, doublon = null;
+  var groups = {}, totals = {}, units = {}, commentCols = {}, commentCol = 0, perteCol = 0;
+  var dernierCol = dateCol, ignorees = [];
   for (c = 0; c < lastCol; c++) {
     var label = "";
-    for (r = 0; r < lastHeaderRow; r++) label += " " + normTxt(vals[r][c]);
+    for (r = 0; r < lastHeaderRow; r++) label += " " + txt(r, c);
     label = label.trim();
     if (!label) continue;
     units[c + 1] = /\bkg\b|kilo/.test(label) ? "kg" : "g";
@@ -762,6 +781,7 @@ function analyserOngletVolume(sheet) {
       dernierCol = Math.max(dernierCol, c + 1);
       continue;
     }
+    if (/perte/.test(label)) { if (!perteCol) perteCol = c + 1; dernierCol = Math.max(dernierCol, c + 1); continue; }
     var sub = sousTypeTexte(label);
     if (/total/.test(label)) {
       if (sub && !totals[sub]) { totals[sub] = c + 1; dernierCol = Math.max(dernierCol, c + 1); }
@@ -771,10 +791,14 @@ function analyserOngletVolume(sheet) {
     if (!g || !sub) continue;
     dernierCol = Math.max(dernierCol, c + 1);
     groups[g] = groups[g] || {};
-    if (groups[g][sub]) doublon = "Parcelle « " + g + " » : deux colonnes « poids " + LIBELLES_TYPES[sub] + " ».";
-    else groups[g][sub] = c + 1;
+    if (!groups[g][sub]) { groups[g][sub] = c + 1; continue; }
+    // deux colonnes du même type pour une parcelle (ex. « poids brut » et « poids brut non lavé ») :
+    // on garde celle qui dit « non lavé » ; l'autre est ignorée (et signalée par verifierOngletVolume).
+    var anc = groups[g][sub], ancLabel = "";
+    for (r = 0; r < lastHeaderRow; r++) ancLabel += " " + txt(r, anc - 1);
+    if (/non lave/.test(label) && !/non lave/.test(ancLabel)) { groups[g][sub] = c + 1; ignorees.push({ parcelle: g, col: anc }); }
+    else ignorees.push({ parcelle: g, col: c + 1 });
   }
-  if (doublon) return { error: doublon };
 
   var ordre = Object.keys(groups).sort(function (a, b) {
     return Math.min.apply(null, TYPES_POIDS.map(function (t) { return groups[a][t] || 9999; })) -
@@ -782,6 +806,7 @@ function analyserOngletVolume(sheet) {
   });
   return {
     dateCol: dateCol, headerRow: lastHeaderRow, startRow: lastHeaderRow + 1, groups: groups, totals: totals,
+    perteCol: perteCol, totalsRow: topGroupRow > 1 ? topGroupRow - 1 : 0, ignorees: ignorees,
     units: units, commentCols: commentCols, commentCol: commentCol, dernierCol: dernierCol, ordre: ordre
   };
 }
@@ -794,16 +819,16 @@ function infosOngletVolume(creer) {
   if (!sheet) {
     if (!creer) return null;
     sheet = ss.insertSheet(VOLUME_SHEET);
-    var ligne1 = [""], ligne2 = ["Date"];
+    var ligne2 = [""], ligne3 = ["Date"];
     PARCELLES_VOLUME.forEach(function (p) {
-      ligne1.push(p.label, "", "");
-      ligne2.push("poids brut", "Poids net vendable", "Commentaire");
+      ligne2.push(p.label, "", "", "");
+      ligne3.push("poids brut non lavé", "Poids lavé non trié", "Poids net vendable (lavé et trié)", "Commentaire");
     });
-    ligne1.push("Total poids brut en g", "Total poids net vendable en g", "% de perte");
-    ligne2.push("", "", "");
-    sheet.getRange(1, 1, 1, ligne1.length).setValues([ligne1]);
+    ligne2.push("Total poids brut en g", "Total lavé non trié en g", "Total poids net vendable en g", "% de perte");
+    ligne3.push("", "", "", "");
     sheet.getRange(2, 1, 1, ligne2.length).setValues([ligne2]);
-    sheet.getRange(1, 1, 2, ligne1.length).setBackground("#D9D9D9").setFontWeight("bold");
+    sheet.getRange(3, 1, 1, ligne3.length).setValues([ligne3]);
+    sheet.getRange(2, 1, 2, ligne2.length).setBackground("#D9D9D9").setFontWeight("bold");
   }
   var info = analyserOngletVolume(sheet);
   if (info.error) return creer ? info : null;
@@ -812,15 +837,77 @@ function infosOngletVolume(creer) {
   return info;
 }
 
-// Total brut / net d'une ligne = somme des cellules correspondantes de toutes les parcelles.
-function ecrireTotauxLigne(sheet, info, row) {
-  Object.keys(info.totals).forEach(function (type) {
-    var refs = [];
-    info.ordre.forEach(function (g) {
-      if (info.groups[g] && info.groups[g][type]) refs.push(columnToLetter(info.groups[g][type]) + row);
-    });
-    if (refs.length) sheet.getRange(row, info.totals[type]).setFormula("=" + refs.join("+"));
+function colsDuType(info, type) {
+  var cols = [];
+  info.ordre.forEach(function (g) { if (info.groups[g] && info.groups[g][type]) cols.push(info.groups[g][type]); });
+  return cols;
+}
+
+// Formules attendues pour la ligne `row` : total brut / lavé / net = somme des cellules de toutes les
+// parcelles ; % de perte = 1 − net / lavé (vide tant que l'un des deux est à 0).
+function formulesLigneVolume(info, row) {
+  var f = {};
+  TYPES_POIDS.forEach(function (type) {
+    if (!info.totals[type]) return;
+    var refs = colsDuType(info, type).map(function (c) { return columnToLetter(c) + row; });
+    if (refs.length) f[info.totals[type]] = "=" + refs.join("+");
   });
+  if (info.perteCol && info.totals.lave && info.totals.net) {
+    var w = columnToLetter(info.totals.lave) + row, x = columnToLetter(info.totals.net) + row;
+    f[info.perteCol] = "=IF(AND(" + w + ">0;" + x + ">0);1-(" + x + "/" + w + ");\"\")";
+  }
+  return f;
+}
+
+// Remet d'aplomb TOUTES les formules de total, sans jamais écraser un total saisi à la main :
+//  - lignes de données (et lignes pré-remplies en dessous) : total brut / lavé / net / % de perte ;
+//  - ligne du haut : somme (ou moyenne pour le % de perte) de TOUTE la colonne, de la 1re ligne de
+//    données jusqu'en bas (« V4:V »), donc nouvelles saisies comprises.
+function assurerTotauxVolume(info) {
+  var sheet = info.sheet, start = info.startRow;
+  var tcols = Object.keys(info.totals).map(function (t) { return info.totals[t]; });
+  if (info.perteCol) tcols.push(info.perteCol);
+  if (!tcols.length) return;
+  var nb = Math.max(1, Math.min(NB_MAX_LIGNES, sheet.getMaxRows() - start + 1));
+  var rng = sheet.getRange(start, 1, nb, info.dernierCol);
+  var vals = rng.getValues(), forms = rng.getFormulas();
+  var last = -1, i;
+  for (i = 0; i < nb; i++) {
+    var d = vals[i][info.dateCol - 1];
+    var hasF = tcols.some(function (c) { return forms[i][c - 1] !== ""; });
+    if ((d !== "" && d !== null) || hasF) last = i;
+  }
+  for (i = 0; i <= last; i++) {
+    var row = start + i, attendu = formulesLigneVolume(info, row);
+    Object.keys(attendu).forEach(function (cs) {
+      var c = Number(cs), actuel = forms[i][c - 1], valeur = vals[i][c - 1];
+      if (actuel === attendu[cs]) return;
+      if (actuel === "" && valeur !== "" && valeur !== null) {
+        // total tapé à la main : on le garde tant qu'aucune parcelle n'a de poids de ce type
+        var type = null;
+        TYPES_POIDS.forEach(function (t) { if (info.totals[t] === c) type = t; });
+        if (type) {
+          var aSaisie = colsDuType(info, type).some(function (cc) { return vals[i][cc - 1] !== "" && vals[i][cc - 1] !== null; });
+          if (!aSaisie) return;
+        }
+      }
+      sheet.getRange(row, c).setFormula(attendu[cs]);
+    });
+  }
+  if (info.totalsRow) {
+    var tr = info.totalsRow;
+    TYPES_POIDS.forEach(function (t) {
+      if (!info.totals[t]) return;
+      var L = columnToLetter(info.totals[t]), f = "=SUM(" + L + start + ":" + L + ")";
+      var cell = sheet.getRange(tr, info.totals[t]);
+      if (cell.getFormula() !== f) cell.setFormula(f);
+    });
+    if (info.perteCol) {
+      var P = columnToLetter(info.perteCol), fp = "=IFERROR(AVERAGE(" + P + start + ":" + P + ");\"\")";
+      var cp = sheet.getRange(tr, info.perteCol);
+      if (cp.getFormula() !== fp) cp.setFormula(fp);
+    }
+  }
 }
 
 function handleRecolteVolume(data) {
@@ -840,8 +927,7 @@ function handleRecolteVolume(data) {
 
   var sheet = info.sheet, tz = info.tz, start = info.startRow;
   var jour = jourStr(parseDateOnly(data.date), tz);
-  var NB_MAX = 3000;
-  var bloc = lireBlocBorne(sheet, start, 1, info.dernierCol, NB_MAX);
+  var bloc = lireBlocBorne(sheet, start, 1, info.dernierCol, NB_MAX_LIGNES);
 
   // Une ligne par date : on cherche d'abord la ligne de ce jour ; sinon la place chronologique.
   var rowSame = -1, insertion = -1, nextFree = -1;
@@ -859,7 +945,7 @@ function handleRecolteVolume(data) {
     target = rowSame;
   } else {
     if (nextFree === -1) {
-      if (bloc.length < NB_MAX) { sheet.insertRowsAfter(sheet.getMaxRows(), 200); nextFree = start + bloc.length; }
+      if (bloc.length < NB_MAX_LIGNES) { sheet.insertRowsAfter(sheet.getMaxRows(), 200); nextFree = start + bloc.length; }
       else return jsonOutput({ ok: false, error: "Tableau plein." });
     }
     target = insertion !== -1 ? insertion : nextFree;
@@ -888,20 +974,20 @@ function handleRecolteVolume(data) {
     }
   }
 
-  // Totaux : formules des colonnes « Total … » de la ligne saisie, et des lignes décalées d'un
-  // cran vers le bas (réécrites, sans dépendre de la façon dont la copie ajuste les références).
-  ecrireTotauxLigne(sheet, info, target);
-  if (rowSame === -1 && insertion !== -1) {
-    for (var rr = insertion + 1; rr <= nextFree; rr++) ecrireTotauxLigne(sheet, info, rr);
-  }
+  // Totaux : formules de la ligne saisie, des lignes décalées, et de la ligne du haut (toute la colonne)
+  assurerTotauxVolume(info);
+  SpreadsheetApp.flush();
 
   return jsonOutput({ ok: true, row: target, cumul: cumul });
 }
 
+function nombreOuNull(v) { return (typeof v === "number" && isFinite(v)) ? v : null; }
+
 // Lit tout le tableau et le met en forme pour l'appli (poids toujours en grammes).
 function lireTableauPoids(info) {
   var sheet = info.sheet;
-  var vals = lireBlocBorne(sheet, info.startRow, 1, info.dernierCol, 3000);
+  SpreadsheetApp.flush();
+  var vals = lireBlocBorne(sheet, info.startRow, 1, info.dernierCol, NB_MAX_LIGNES);
   function enG(v, col) {
     var n = Number(v);
     if (!isFinite(n) || v === "" || v === null) return 0;
@@ -912,31 +998,57 @@ function lireTableauPoids(info) {
     PARCELLES_VOLUME.forEach(function (p) { if (p.key === g) label = p.label; });
     return { key: g, label: label };
   });
-  var rows = [], totaux = {}, totalBrut = 0, totalNet = 0, signature = 0;
-  parcelles.forEach(function (p) { totaux[p.key] = { brut: 0, net: 0 }; });
+  var rows = [], totaux = {}, somme = { brut: 0, lave: 0, net: 0 }, signature = 0;
+  parcelles.forEach(function (p) { totaux[p.key] = { brut: 0, lave: 0, net: 0, pLave: 0, pNet: 0 }; });
 
   for (var i = 0; i < vals.length; i++) {
     var d = vals[i][info.dateCol - 1];
     if (d === "" || d === null) break;
-    var ligne = { date: d instanceof Date ? formatDateFR(d) : d, v: {}, totalBrut: 0, totalNet: 0 };
+    var ligne = { date: d instanceof Date ? formatDateFR(d) : d, v: {}, totalBrut: 0, totalLave: 0, totalNet: 0 };
+    var calc = { brut: 0, lave: 0, net: 0 };
     parcelles.forEach(function (p) {
-      var grp = info.groups[p.key], o = { brut: 0, net: 0, commentaire: "" };
+      var grp = info.groups[p.key], o = { brut: 0, lave: 0, net: 0, commentaire: "" };
       TYPES_POIDS.forEach(function (t) {
         var g = grp[t] ? enG(vals[i][grp[t] - 1], grp[t]) : 0;
         o[t] = g;
         totaux[p.key][t] += g;
+        calc[t] += g;
         signature += g;
       });
       var colCom = info.commentCols[p.key];
       if (colCom) o.commentaire = (vals[i][colCom - 1] || "").toString();
-      if (o.brut || o.net || o.commentaire) ligne.v[p.key] = o;
-      ligne.totalBrut += o.brut;
-      ligne.totalNet += o.net;
+      // pour la perte par parcelle : seulement les dates où le lavé ET le net vendable sont renseignés
+      if (o.lave > 0 && o.net > 0) { totaux[p.key].pLave += o.lave; totaux[p.key].pNet += o.net; }
+      if (o.brut || o.lave || o.net || o.commentaire) ligne.v[p.key] = o;
     });
-    totalBrut += ligne.totalBrut; totalNet += ligne.totalNet;
+    // total de la ligne : colonne « Total … » du Sheet (y compris un total tapé à la main), sinon somme
+    var tb = info.totals.brut ? nombreOuNull(vals[i][info.totals.brut - 1]) : null;
+    var tl = info.totals.lave ? nombreOuNull(vals[i][info.totals.lave - 1]) : null;
+    var tn = info.totals.net ? nombreOuNull(vals[i][info.totals.net - 1]) : null;
+    ligne.totalBrut = tb !== null ? tb : calc.brut;
+    ligne.totalLave = tl !== null ? tl : calc.lave;
+    ligne.totalNet = tn !== null ? tn : calc.net;
+    ligne.perte = (ligne.totalLave > 0 && ligne.totalNet > 0) ? 1 - ligne.totalNet / ligne.totalLave : null;
+    somme.brut += ligne.totalBrut; somme.lave += ligne.totalLave; somme.net += ligne.totalNet;
     rows.push(ligne);
   }
-  return { unite: "g", parcelles: parcelles, rows: rows, totaux: totaux, totalBrut: totalBrut, totalNet: totalNet, signature: signature };
+
+  // Totaux / moyenne de la ligne du haut du Sheet (ce que l'utilisateur voit en haut des colonnes)
+  var haut = { brut: null, lave: null, net: null, perte: null };
+  if (info.totalsRow) {
+    TYPES_POIDS.forEach(function (t) {
+      if (info.totals[t]) haut[t] = nombreOuNull(sheet.getRange(info.totalsRow, info.totals[t]).getValue());
+    });
+    if (info.perteCol) haut.perte = nombreOuNull(sheet.getRange(info.totalsRow, info.perteCol).getValue());
+  }
+  var totalBrut = haut.brut !== null ? haut.brut : somme.brut;
+  var totalLave = haut.lave !== null ? haut.lave : somme.lave;
+  var totalNet = haut.net !== null ? haut.net : somme.net;
+  var perte = haut.perte !== null ? haut.perte : ((totalLave > 0 && totalNet > 0) ? 1 - totalNet / totalLave : null);
+  return {
+    unite: "g", parcelles: parcelles, rows: rows, totaux: totaux,
+    totalBrut: totalBrut, totalLave: totalLave, totalNet: totalNet, perte: perte, signature: signature
+  };
 }
 
 // Écran de contrôle : les 5 dernières dates + une « signature » (somme de tous les poids) que
@@ -951,7 +1063,7 @@ function obtenirDernieresPesees() {
 // Tableau complet pour l'écran de consultation.
 function obtenirTableauPoids() {
   var info = infosOngletVolume(false);
-  if (!info) return { unite: "g", parcelles: [], rows: [], totaux: {}, totalBrut: 0, totalNet: 0, signature: 0 };
+  if (!info) return { unite: "g", parcelles: [], rows: [], totaux: {}, totalBrut: 0, totalLave: 0, totalNet: 0, perte: null, signature: 0 };
   var t = lireTableauPoids(info);
   t.rows = t.rows.slice().reverse(); // la plus récente en premier
   return t;
@@ -971,15 +1083,338 @@ function verifierOngletVolume() {
     PARCELLES_VOLUME.forEach(function (p) {
       var g = info.groups[p.key];
       if (!g) { lignes.push("⚠ " + p.label + " : AUCUN groupe de colonnes reconnu"); return; }
-      lignes.push(p.label + " : brut=" + (g.brut ? columnToLetter(g.brut) : "—") + " · net vendable=" + (g.net ? columnToLetter(g.net) : "—") +
-        " · commentaire=" + (info.commentCols[p.key] ? columnToLetter(info.commentCols[p.key]) : "—") +
-        " (unité " + (info.units[g.brut || g.net] || "g") + ")");
+      lignes.push(p.label + " : " + TYPES_POIDS.map(function (t) {
+        return LIBELLES_TYPES[t] + "=" + (g[t] ? columnToLetter(g[t]) : "—");
+      }).join(" · ") + " · commentaire=" + (info.commentCols[p.key] ? columnToLetter(info.commentCols[p.key]) : "— (⚠ aucune colonne « Commentaire » : le commentaire sera mis en note sur la cellule du poids)"));
     });
-    TYPES_POIDS.forEach(function (t) { if (info.totals[t]) lignes.push("Total " + LIBELLES_TYPES[t] + " : colonne " + columnToLetter(info.totals[t])); });
-    if (!info.totals.brut || !info.totals.net) lignes.push("⚠ Colonne de total brut et/ou net non reconnue (en-tête contenant « total » + « brut » / « net »).");
+    info.ignorees.forEach(function (x) {
+      lignes.push("⚠ Colonne " + columnToLetter(x.col) + " (" + x.parcelle + ") en double d'un autre poids de même type : IGNORÉE par l'appli et par les totaux. Renomme-la (ex. « Commentaire ») ou supprime-la.");
+    });
+    TYPES_POIDS.forEach(function (t) {
+      lignes.push("Total " + LIBELLES_TYPES[t] + " : " + (info.totals[t] ? "colonne " + columnToLetter(info.totals[t]) : "⚠ colonne NON reconnue (en-tête « Total … »)"));
+    });
+    lignes.push("% de perte : " + (info.perteCol ? "colonne " + columnToLetter(info.perteCol) + " (= 1 − net vendable / lavé non trié)" : "⚠ non reconnue"));
+    lignes.push("Ligne des totaux / moyenne : " + (info.totalsRow ? "ligne " + info.totalsRow + " (formules sur toute la colonne, à partir de la ligne " + info.startRow + ")" : "⚠ non trouvée (elle doit être au-dessus de la ligne des noms de parcelles)"));
   }
   Logger.log(lignes.join("\n"));
   return lignes;
+}
+
+// À exécuter UNE fois (facultatif : l'appli le fait aussi à chaque saisie) : réécrit les formules
+// de total de toutes les lignes et de la ligne du haut dans « Récolte volume ».
+function reparerTotauxVolume() {
+  var info = infosOngletVolume(false);
+  if (!info) { Logger.log("Onglet introuvable."); return; }
+  assurerTotauxVolume(info);
+  Logger.log("Totaux de « Récolte volume » réécrits.");
+}
+
+/* ---------- Ventes : onglet "Vente" ---------- */
+// Mise en page : une ligne par DATE (ordre chronologique). Pour chaque qualité (Brisure, Morceaux,
+// 2e choix, 1er choix, Extra) : 2 colonnes [Prix/Kg | Poids g]. Puis 3 colonnes calculées par
+// date : « Total vente » (€), « Prix de vente moyen » (€/kg), « Total poids vendu » (g). Au-dessus
+// des en-têtes, le tableau des TOTAUX / MOYENNE (en rouge) de chaque colonne, sur toute la colonne.
+// Plusieurs ventes de la même qualité le même jour : poids additionnés, prix = moyenne pondérée.
+var VENTE_SHEET = "Vente";
+var QUALITES_VENTE = [
+  { key: "brisure", label: "Brisure", re: /brisure/ },
+  { key: "morceaux", label: "Morceaux", re: /morceau/ },
+  { key: "choix2", label: "2e choix", re: /\b2\s*(e|eme|nd|nde)?\s*choix|deuxieme/ },
+  { key: "choix1", label: "1er choix", re: /\b1\s*(er|ere|ier)?\s*choix|premier/ },
+  { key: "extra", label: "Extra", re: /extra/ }
+];
+
+function cleQualiteTexte(t) {
+  var trouvees = [];
+  QUALITES_VENTE.forEach(function (q) { if (q.re.test(t)) trouvees.push(q.key); });
+  return trouvees.length === 1 ? trouvees[0] : null;
+}
+function cleQualiteLabel(label) {
+  var k = null;
+  QUALITES_VENTE.forEach(function (q) { if (q.label === label || q.key === label) k = q.key; });
+  return k;
+}
+
+function analyserOngletVente(sheet) {
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  var nbRows = Math.min(12, Math.max(sheet.getMaxRows(), 1));
+  var vals = sheet.getRange(1, 1, nbRows, lastCol).getValues();
+  function txt(r, c) { return typeof vals[r][c] === "string" ? normTxt(vals[r][c]) : ""; }
+  var r, c;
+
+  var qualCols = {}, groupRow = 0;
+  for (r = 0; r < nbRows; r++) {
+    for (c = 1; c < lastCol; c++) {
+      var k = cleQualiteTexte(txt(r, c));
+      if (k && !qualCols[k]) { qualCols[k] = c + 1; if (!groupRow) groupRow = r + 1; }
+    }
+  }
+  var manque = QUALITES_VENTE.filter(function (q) { return !qualCols[q.key]; }).map(function (q) { return q.label; });
+  if (manque.length) return { error: "Onglet '" + VENTE_SHEET + "' : qualité(s) introuvable(s) dans les en-têtes : " + manque.join(", ") + "." };
+
+  var headerRow = 0;
+  for (r = groupRow; r < nbRows && !headerRow; r++) {
+    for (c = 0; c < lastCol; c++) if (/^prix/.test(txt(r, c))) { headerRow = r + 1; break; }
+  }
+  if (!headerRow) return { error: "Onglet '" + VENTE_SHEET + "' : ligne d'en-têtes « Prix/Kg » / « Poids » introuvable." };
+
+  var cols = {}, dernierQ = 0;
+  for (var qi = 0; qi < QUALITES_VENTE.length; qi++) {
+    var key = QUALITES_VENTE[qi].key, pc = qualCols[key];
+    if (!/^prix/.test(txt(headerRow - 1, pc - 1)) || !/^poids/.test(txt(headerRow - 1, pc))) {
+      return { error: "Onglet '" + VENTE_SHEET + "' : sous « " + QUALITES_VENTE[qi].label + " » les colonnes doivent s'appeler « Prix… » puis « Poids… » (ligne " + headerRow + ")." };
+    }
+    cols[key] = { prix: pc, poids: pc + 1 };
+    dernierQ = Math.max(dernierQ, pc + 1);
+  }
+
+  var colEuros = 0, colMoy = 0, colG = 0;
+  for (c = dernierQ; c < lastCol; c++) {
+    var label = "";
+    for (r = 0; r < headerRow; r++) label += " " + txt(r, c);
+    label = label.trim();
+    if (!label) continue;
+    if (/moyen/.test(label)) { if (!colMoy) colMoy = c + 1; }
+    else if (/total/.test(label) && /vente|€|eur/.test(label)) { if (!colEuros) colEuros = c + 1; }
+    else if (/total/.test(label) && /\bg\b|poids|vendu/.test(label)) { if (!colG) colG = c + 1; }
+  }
+  if (!colEuros || !colMoy || !colG) {
+    return { error: "Onglet '" + VENTE_SHEET + "' : colonnes « Total vente (€) », « Prix de vente moyen » et « Total poids vendu » non reconnues." };
+  }
+
+  // ligne du tableau des totaux : la ligne (au-dessus des en-têtes) qui contient des formules
+  var totalsRow = 0;
+  var probe = cols.brisure.poids;
+  for (r = groupRow + 1; r < headerRow && !totalsRow; r++) {
+    if (sheet.getRange(r, probe).getFormula() !== "") totalsRow = r;
+  }
+  if (!totalsRow) totalsRow = Math.max(headerRow - 2, groupRow + 1);
+
+  return {
+    dateCol: 1, groupRow: groupRow, headerRow: headerRow, startRow: headerRow + 1, totalsRow: totalsRow,
+    cols: cols, colEuros: colEuros, colMoy: colMoy, colG: colG,
+    dernierCol: Math.max(colEuros, colMoy, colG, dernierQ)
+  };
+}
+
+function infosOngletVente(creer) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = trouverOngletSouple(ss, VENTE_SHEET);
+  if (!sheet) {
+    if (!creer) return null;
+    sheet = ss.insertSheet(VENTE_SHEET);
+    var l1 = [""], l2 = [""], l5 = [""];
+    QUALITES_VENTE.forEach(function (q) { l1.push(q.label, ""); l2.push("moyenne", "total"); l5.push("Prix/Kg", "Poids g"); });
+    l1.push("", "", ""); l2.push("total €", "moyenne €", "total g"); l5.push("Total vente", "Prix de vente moyen", "Total poids vendu");
+    sheet.getRange(1, 1, 1, l1.length).setValues([l1]);
+    sheet.getRange(2, 1, 1, l2.length).setValues([l2]);
+    sheet.getRange(5, 1, 1, l5.length).setValues([l5]);
+    sheet.getRange(1, 1, 3, l1.length).setFontColor("#980000").setFontWeight("bold");
+    sheet.getRange(5, 1, 1, l5.length).setFontWeight("bold");
+  }
+  var info = analyserOngletVente(sheet);
+  if (info.error) return creer ? info : null;
+  info.sheet = sheet;
+  info.tz = ss.getSpreadsheetTimeZone();
+  return info;
+}
+
+// Formules attendues pour une ligne de date : total € = Σ prix × poids / 1000 ; moyenne €/kg ; total g
+function formulesLigneVente(info, row) {
+  var termes = [], poids = [];
+  QUALITES_VENTE.forEach(function (q) {
+    var p = columnToLetter(info.cols[q.key].prix) + row, w = columnToLetter(info.cols[q.key].poids) + row;
+    termes.push("(" + p + "*" + w + ")");
+    poids.push(w);
+  });
+  var f = {};
+  var E = columnToLetter(info.colEuros) + row, G = columnToLetter(info.colG) + row;
+  f[info.colEuros] = "=(" + termes.join("+") + ")/1000";
+  f[info.colMoy] = "=IF(" + G + ">0;" + E + "/(" + G + "/1000);\"\")";
+  f[info.colG] = "=" + poids.join("+");
+  return f;
+}
+
+// Remet d'aplomb les formules des lignes de date et le tableau des totaux du haut (sur TOUTE la
+// colonne, à partir de la 1re ligne de données).
+function assurerTotauxVente(info) {
+  var sheet = info.sheet, start = info.startRow;
+  var nb = Math.max(1, Math.min(NB_MAX_LIGNES, sheet.getMaxRows() - start + 1));
+  var rng = sheet.getRange(start, 1, nb, info.dernierCol);
+  var vals = rng.getValues(), forms = rng.getFormulas();
+  var fcols = [info.colEuros, info.colMoy, info.colG], last = -1, i;
+  for (i = 0; i < nb; i++) {
+    var d = vals[i][0];
+    var hasF = fcols.some(function (c) { return forms[i][c - 1] !== ""; });
+    if ((d !== "" && d !== null) || hasF) last = i;
+  }
+  for (i = 0; i <= last; i++) {
+    var row = start + i, attendu = formulesLigneVente(info, row);
+    Object.keys(attendu).forEach(function (cs) {
+      var c = Number(cs);
+      if (forms[i][c - 1] !== attendu[cs]) sheet.getRange(row, c).setFormula(attendu[cs]);
+    });
+  }
+  var tr = info.totalsRow;
+  function poser(col, f) {
+    var cell = sheet.getRange(tr, col);
+    if (cell.getFormula() !== f) cell.setFormula(f);
+  }
+  QUALITES_VENTE.forEach(function (q) {
+    var P = columnToLetter(info.cols[q.key].prix), W = columnToLetter(info.cols[q.key].poids);
+    poser(info.cols[q.key].prix, "=IFERROR(AVERAGE(" + P + start + ":" + P + ");\"\")");
+    poser(info.cols[q.key].poids, "=SUM(" + W + start + ":" + W + ")");
+  });
+  var LE = columnToLetter(info.colEuros), LM = columnToLetter(info.colMoy), LG = columnToLetter(info.colG);
+  poser(info.colEuros, "=SUM(" + LE + start + ":" + LE + ")");
+  poser(info.colMoy, "=IFERROR(AVERAGE(" + LM + start + ":" + LM + ");\"\")");
+  poser(info.colG, "=SUM(" + LG + start + ":" + LG + ")");
+}
+
+// data = { date: "AAAA-MM-JJ", lignes: [ { qualite: "1er choix", prix: 350, poids: 291 }, ... ] }
+function handleVente(data) {
+  var info = infosOngletVente(true);
+  if (info.error) return jsonOutput({ ok: false, error: info.error });
+  if (!data.date) return jsonOutput({ ok: false, error: "Date manquante." });
+  var lignes = data.lignes || [];
+  if (!lignes.length) return jsonOutput({ ok: false, error: "Aucune qualité renseignée." });
+  var propres = [];
+  for (var li = 0; li < lignes.length; li++) {
+    var q = cleQualiteLabel(lignes[li].qualite);
+    var prix = Number(lignes[li].prix), poids = Number(lignes[li].poids);
+    if (!q) return jsonOutput({ ok: false, error: "Qualité inconnue : " + lignes[li].qualite });
+    if (!isFinite(prix) || prix <= 0) return jsonOutput({ ok: false, error: "Prix invalide pour " + lignes[li].qualite + "." });
+    if (!isFinite(poids) || poids <= 0) return jsonOutput({ ok: false, error: "Poids invalide pour " + lignes[li].qualite + "." });
+    propres.push({ key: q, prix: prix, poids: poids });
+  }
+
+  var sheet = info.sheet, tz = info.tz, start = info.startRow;
+  var jour = jourStr(parseDateOnly(data.date), tz);
+  var bloc = lireBlocBorne(sheet, start, 1, info.dernierCol, NB_MAX_LIGNES);
+  var rowSame = -1, insertion = -1, nextFree = -1;
+  for (var i = 0; i < bloc.length; i++) {
+    var d = bloc[i][0];
+    if (d === "" || d === null) { nextFree = start + i; break; }
+    if (d instanceof Date) {
+      var j = jourStr(d, tz);
+      if (j === jour && rowSame === -1) rowSame = start + i;
+      if (j > jour && insertion === -1) insertion = start + i;
+    }
+  }
+  var target;
+  if (rowSame !== -1) {
+    target = rowSame;
+  } else {
+    if (nextFree === -1) {
+      if (bloc.length < NB_MAX_LIGNES) { sheet.insertRowsAfter(sheet.getMaxRows(), 200); nextFree = start + bloc.length; }
+      else return jsonOutput({ ok: false, error: "Tableau plein." });
+    }
+    target = insertion !== -1 ? insertion : nextFree;
+    if (insertion !== -1) shiftBlockRowsDown(sheet, 1, info.dernierCol, insertion, nextFree);
+    sheet.getRange(target, 1).setValue(parseDateOnly(data.date)).setNumberFormat(FORMAT_DATE);
+  }
+
+  propres.forEach(function (p) {
+    var cp = sheet.getRange(target, info.cols[p.key].prix), cw = sheet.getRange(target, info.cols[p.key].poids);
+    var ancienP = Number(cp.getValue()), ancienW = Number(cw.getValue());
+    if (isFinite(ancienW) && ancienW > 0) {
+      var w = ancienW + p.poids;
+      var moy = ((isFinite(ancienP) ? ancienP : 0) * ancienW + p.prix * p.poids) / w;
+      cp.setValue(Math.round(moy * 100) / 100);
+      cw.setValue(Math.round(w));
+    } else {
+      cp.setValue(Math.round(p.prix * 100) / 100);
+      cw.setValue(Math.round(p.poids));
+    }
+  });
+
+  assurerTotauxVente(info);
+  sheet.getRange(target, info.colEuros, 1, 2).setNumberFormat("#,##0.00");
+  SpreadsheetApp.flush();
+  return jsonOutput({ ok: true, row: target });
+}
+
+function lireTableauVente(info) {
+  var sheet = info.sheet;
+  SpreadsheetApp.flush();
+  var vals = lireBlocBorne(sheet, info.startRow, 1, info.dernierCol, NB_MAX_LIGNES);
+  var qualites = QUALITES_VENTE.map(function (q) { return { key: q.key, label: q.label }; });
+  var rows = [], signature = 0, somme = { euros: 0, g: 0 };
+  for (var i = 0; i < vals.length; i++) {
+    var d = vals[i][0];
+    if (d === "" || d === null) break;
+    var ligne = { date: d instanceof Date ? formatDateFR(d) : d, q: {}, euros: 0, moyenne: null, g: 0 };
+    var eurosCalc = 0, gCalc = 0;
+    QUALITES_VENTE.forEach(function (q) {
+      var p = Number(vals[i][info.cols[q.key].prix - 1]), w = Number(vals[i][info.cols[q.key].poids - 1]);
+      if (isFinite(w) && w > 0) {
+        var pp = isFinite(p) ? p : 0;
+        ligne.q[q.key] = { prix: pp, poids: w };
+        eurosCalc += pp * w / 1000; gCalc += w; signature += w;
+      }
+    });
+    var e = nombreOuNull(vals[i][info.colEuros - 1]), m = nombreOuNull(vals[i][info.colMoy - 1]), g = nombreOuNull(vals[i][info.colG - 1]);
+    ligne.euros = e !== null ? e : eurosCalc;
+    ligne.g = g !== null ? g : gCalc;
+    ligne.moyenne = m !== null ? m : (ligne.g > 0 ? ligne.euros / (ligne.g / 1000) : null);
+    somme.euros += ligne.euros; somme.g += ligne.g;
+    rows.push(ligne);
+  }
+  // Tableau rouge du haut, tel qu'il est dans le Sheet
+  var tr = info.totalsRow, haut = { q: {} };
+  QUALITES_VENTE.forEach(function (q) {
+    haut.q[q.key] = {
+      moyenne: nombreOuNull(sheet.getRange(tr, info.cols[q.key].prix).getValue()),
+      total: nombreOuNull(sheet.getRange(tr, info.cols[q.key].poids).getValue())
+    };
+  });
+  haut.euros = nombreOuNull(sheet.getRange(tr, info.colEuros).getValue());
+  haut.moyenne = nombreOuNull(sheet.getRange(tr, info.colMoy).getValue());
+  haut.g = nombreOuNull(sheet.getRange(tr, info.colG).getValue());
+  if (haut.euros === null) haut.euros = somme.euros;
+  if (haut.g === null) haut.g = somme.g;
+  return { qualites: qualites, totaux: haut, rows: rows, signature: signature };
+}
+
+function obtenirDernieresVentes() {
+  var info = infosOngletVente(false);
+  if (!info) return { signature: 0, qualites: [], rows: [] };
+  var t = lireTableauVente(info);
+  return { signature: t.signature, qualites: t.qualites, rows: t.rows.slice(-5).reverse() };
+}
+
+function obtenirTableauVente() {
+  var info = infosOngletVente(false);
+  if (!info) return { qualites: [], totaux: { q: {}, euros: 0, moyenne: null, g: 0 }, rows: [], signature: 0 };
+  var t = lireTableauVente(info);
+  t.rows = t.rows.slice().reverse();
+  return t;
+}
+
+function verifierOngletVente() {
+  var info = infosOngletVente(false);
+  var lignes = [];
+  if (!info) {
+    lignes.push("Onglet '" + VENTE_SHEET + "' introuvable (il sera créé à la première vente) ou en-têtes non reconnus.");
+    var sh = trouverOngletSouple(SpreadsheetApp.getActiveSpreadsheet(), VENTE_SHEET);
+    if (sh) { var a = analyserOngletVente(sh); if (a.error) lignes.push("Détail : " + a.error); }
+  } else {
+    lignes.push("Données à partir de la ligne " + info.startRow + " · tableau des totaux (rouge) : ligne " + info.totalsRow);
+    QUALITES_VENTE.forEach(function (q) {
+      lignes.push(q.label + " : prix/kg=" + columnToLetter(info.cols[q.key].prix) + " · poids=" + columnToLetter(info.cols[q.key].poids));
+    });
+    lignes.push("Total vente € : " + columnToLetter(info.colEuros) + " · prix moyen : " + columnToLetter(info.colMoy) + " · total poids : " + columnToLetter(info.colG));
+  }
+  Logger.log(lignes.join("\n"));
+  return lignes;
+}
+
+// Facultatif (l'appli le fait à chaque vente) : réécrit toutes les formules de l'onglet Vente.
+function reparerTotauxVente() {
+  var info = infosOngletVente(false);
+  if (!info) { Logger.log("Onglet introuvable."); return; }
+  assurerTotauxVente(info);
+  Logger.log("Totaux de « Vente » réécrits.");
 }
 
 /* ---------- Nettoyage ponctuel : effacer une ligne de test du journal Heures ---------- */
