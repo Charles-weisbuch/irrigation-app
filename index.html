@@ -344,7 +344,7 @@
     border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.2); vertical-align: -1px;
   }
   .gros-input{ font-size: 26px !important; font-weight: 700; }
-  .type-seg{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .type-seg{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
   .type-seg button{
     background: var(--card); border: 1.5px solid #E1DACB; border-radius: 12px;
     padding: 11px 4px; font-size: 14px; font-weight: 700; color: var(--ink-soft); cursor: pointer;
@@ -1744,12 +1744,11 @@ function renderRecolteSaisie(parcelle){
 
 /* ---------- Poids après récolte (récolté / brut / net vendable, en grammes) ---------- */
 const TYPES_POIDS_UI = [
-  { id: "recolte", court: "Récolté", aide: "Poids récolté" },
   { id: "brut", court: "Brut", aide: "Poids brut (avant lavage et tri)" },
   { id: "net", court: "Net vendable", aide: "Poids net vendable (après lavage et tri)" }
 ];
 const CLES_PARCELLES = { "La Fontaine": "fontaine", "La Baume": "baume", "Bousquet": "bousquet", "Riou": "riou", "Les Pilles": "pilles" };
-let typePoidsChoisi = "recolte";
+let typePoidsChoisi = "brut";
 
 function fmtN(n){ return Math.round(Number(n) || 0).toLocaleString("fr-FR"); }
 function fmtG(n){ return fmtN(n) + " g"; }
@@ -1780,12 +1779,15 @@ function renderPoidsParcelles(){
 function detailPoidsHTML(r, parcelles){
   const lignes = (parcelles || []).filter(p => r.v && r.v[p.key]).map(p => {
     const v = r.v[p.key], m = [];
-    if(v.recolte) m.push("récolté " + fmtN(v.recolte));
     if(v.brut) m.push("brut " + fmtN(v.brut));
     if(v.net) m.push("net " + fmtN(v.net));
-    return "<b>" + escapeHtml(p.label) + "</b> : " + m.join(" · ");
+    return "<b>" + escapeHtml(p.label) + "</b> : " + (m.join(" · ") || "—") + (v.commentaire ? " — <i>" + escapeHtml(v.commentaire) + "</i>" : "");
   });
   return lignes.length ? lignes.join("<br>") : "&nbsp;";
+}
+
+function pertePct(brut, net){
+  return brut > 0 ? Math.round((1 - net / brut) * 100) + " %" : "—";
 }
 
 let signaturePeseesConnue = null;
@@ -1963,20 +1965,21 @@ async function renderConsultationPoids(){
   }
   const lignesParcelles = (t.parcelles || []).map(p => {
     const x = (t.totaux && t.totaux[p.key]) || { recolte: 0, brut: 0, net: 0 };
-    return `<tr><td>${escapeHtml(p.label)}</td><td>${fmtN(x.recolte)}</td><td>${fmtN(x.brut)}</td><td>${fmtN(x.net)}</td></tr>`;
+    return `<tr><td>${escapeHtml(p.label)}</td><td>${fmtN(x.brut)}</td><td>${fmtN(x.net)}</td><td>${pertePct(x.brut, x.net)}</td></tr>`;
   }).join("");
   body.innerHTML = `
     <div class="gros-totaux">
       <div class="gt"><span class="gt-label">Total brut</span><span class="gt-val">${fmtG(t.totalBrut)}</span></div>
       <div class="gt"><span class="gt-label">Total net vendable</span><span class="gt-val">${fmtG(t.totalNet)}</span></div>
+      <div class="gt" style="grid-column:1 / -1;"><span class="gt-label">Perte (brut → net vendable)</span><span class="gt-val">${pertePct(t.totalBrut, t.totalNet)}</span></div>
     </div>
 
     <p class="section-title">Totaux par parcelle <span class="unit">(grammes)</span></p>
     <table class="bilan-table" style="margin-bottom:18px;">
-      <thead><tr><th>Parcelle</th><th>Récolté</th><th>Brut</th><th>Net</th></tr></thead>
+      <thead><tr><th>Parcelle</th><th>Brut</th><th>Net</th><th>Perte</th></tr></thead>
       <tbody>
         ${lignesParcelles}
-        <tr><td>TOTAL</td><td>${fmtN(t.totalRecolte)}</td><td>${fmtN(t.totalBrut)}</td><td>${fmtN(t.totalNet)}</td></tr>
+        <tr><td>TOTAL</td><td>${fmtN(t.totalBrut)}</td><td>${fmtN(t.totalNet)}</td><td>${pertePct(t.totalBrut, t.totalNet)}</td></tr>
       </tbody>
     </table>
 
