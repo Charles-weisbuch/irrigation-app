@@ -351,6 +351,25 @@
   }
   .type-seg button.on{ background: #6B4423; border-color: #6B4423; color: #fff; }
   .type-aide{ font-size: 11px; color: var(--ink-soft); margin: 5px 0 0 2px; }
+  .type-seg.tri{ grid-template-columns: repeat(3, 1fr); }
+  .type-seg.tri button{ font-size: 12.5px; padding: 11px 2px; line-height: 1.15; }
+  .type-seg.parc-seg{ grid-template-columns: repeat(3, 1fr); }
+  .type-seg.parc-seg button{ font-size: 13.5px; padding: 10px 2px; }
+  .vente-grid{ display: grid; grid-template-columns: 78px 1fr 1fr; gap: 6px 8px; align-items: center; margin-bottom: 4px; }
+  .vente-grid .vg-h{ font-size: 11px; font-weight: 700; color: var(--ink-soft); }
+  .vente-grid .vg-q{ font-size: 13.5px; font-weight: 700; color: #980000; }
+  .vente-grid input{
+    width: 100%; padding: 10px 10px; font-size: 16px; border: 1.5px solid #E1DACB; border-radius: 10px;
+    background: var(--card); color: var(--ink); font-family: inherit; box-sizing: border-box;
+  }
+  .vente-grid input:focus{ outline: none; border-color: #980000; }
+  .gros-totaux.red .gt{ border: 1.5px solid #980000; }
+  .gros-totaux.red .gt-val{ color: #980000; }
+  .gros-totaux.red .gt-val small{ font-size: 12px; font-weight: 600; }
+  .bilan-table.red-table{ border: 1.5px solid #980000; font-size: 13px; }
+  .bilan-table.red-table th{ background: #980000; font-size: 11px; padding: 7px 6px; }
+  .bilan-table.red-table td{ padding: 8px 6px; color: #980000; font-weight: 600; }
+  .bilan-table.red-table tr:last-child td{ background: #F6E3E3; }
   .gros-totaux{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
   .gros-totaux .gt{ background: var(--card); border-radius: 14px; box-shadow: var(--shadow); padding: 12px 14px; }
   .gros-totaux .gt-label{ display: block; font-size: 11px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .06em; }
@@ -711,6 +730,13 @@ function clockIcon(){
   </svg>`;
 }
 
+function euroIcon(){
+  return `<svg class="pole-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="12" cy="12" r="9.5" fill="#980000"/>
+    <path d="M15.6 8.6a4.3 4.3 0 1 0 0 6.8M7.6 10.8h5.6M7.6 13.2h5.6" stroke="#F5F1E8" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
+
 function truffeIcon(){
   return `<svg class="pole-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path d="M12 3.5c2.6 0 3.6 1.6 5.4 2.2 2.2.8 3.6 2.8 3.2 5.4-.3 2 .9 3.1.3 5.2-.7 2.5-3 3.9-5.3 4.1-1.8.2-2.4 1.1-3.6 1.1s-2.2-.9-4-1.1C5.8 20.2 3.6 18.6 3.3 16c-.2-1.9.8-3 .4-4.8-.5-2.4.9-4.6 3.1-5.4C8.5 5.2 9.4 3.5 12 3.5z" fill="#6B4423"/>
@@ -778,6 +804,19 @@ function renderChoice(){
         <span>Consulter les poids après récolte</span>
         <span class="consult-chevron">›</span>
       </button>
+
+      <p class="pole-title pole-title-suite">${euroIcon()}<span>Vente</span></p>
+      <div class="parcel-grid parcel-grid-single">
+        <button class="parcel-card" id="choiceVente">
+          <span class="mark" style="background:#980000;"></span>
+          <span class="name">Saisie vente</span>
+        </button>
+      </div>
+      <button class="consult-link" id="choiceConsultationVente">
+        <span class="consult-icon">💶</span>
+        <span>Consulter les ventes</span>
+        <span class="consult-chevron">›</span>
+      </button>
     </main>
   `;
   document.getElementById("choiceArrosage").addEventListener("click", renderSelect);
@@ -786,9 +825,11 @@ function renderChoice(){
   document.getElementById("choiceHeures").addEventListener("click", renderHeuresForm);
   document.getElementById("choiceConsultationHeures").addEventListener("click", renderConsultationHeures);
   document.getElementById("choiceRecolte").addEventListener("click", renderRecolteParcelles);
-  document.getElementById("choicePoids").addEventListener("click", renderPoidsParcelles);
+  document.getElementById("choicePoids").addEventListener("click", () => renderPoidsSaisie());
   document.getElementById("choiceCarte").addEventListener("click", () => renderCarteRecoltes(renderChoice));
   document.getElementById("choiceConsultationPoids").addEventListener("click", renderConsultationPoids);
+  document.getElementById("choiceVente").addEventListener("click", renderVenteSaisie);
+  document.getElementById("choiceConsultationVente").addEventListener("click", renderConsultationVente);
 }
 
 /* ============================================================
@@ -1742,52 +1783,40 @@ function renderRecolteSaisie(parcelle){
   });
 }
 
-/* ---------- Poids après récolte (récolté / brut / net vendable, en grammes) ---------- */
+/* ---------- Poids après récolte (brut non lavé / lavé non trié / net vendable, en grammes) ---------- */
 const TYPES_POIDS_UI = [
-  { id: "brut", court: "Brut", aide: "Poids brut (avant lavage et tri)" },
-  { id: "net", court: "Net vendable", aide: "Poids net vendable (après lavage et tri)" }
+  { id: "brut", court: "Brut non lavé", aide: "Poids brut non lavé (tel que récolté)" },
+  { id: "lave", court: "Lavé non trié", aide: "Poids lavé non trié (après lavage, avant tri)" },
+  { id: "net", court: "Net vendable", aide: "Poids net vendable (lavé et trié)" }
 ];
 const CLES_PARCELLES = { "La Fontaine": "fontaine", "La Baume": "baume", "Bousquet": "bousquet", "Riou": "riou", "Les Pilles": "pilles" };
 let typePoidsChoisi = "brut";
+let parcellePoidsChoisie = (function(){
+  try{ const p = localStorage.getItem("poids_parcelle"); if(p && CLES_PARCELLES[p]) return p; }catch(e){}
+  return RECOLTE_PARCELLES[0];
+})();
 
 function fmtN(n){ return Math.round(Number(n) || 0).toLocaleString("fr-FR"); }
 function fmtG(n){ return fmtN(n) + " g"; }
+function fmtEur(n){ return (Number(n) || 0).toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €"; }
+function fmtEurOuTiret(n){ return (n === null || n === undefined || isNaN(n)) ? "—" : fmtEur(n); }
+function fmtPerte(p){ return (p === null || p === undefined || isNaN(p)) ? "—" : (Math.round(p * 1000) / 10).toLocaleString("fr-FR") + " %"; }
 function dateFR(iso){ const p = String(iso).split("-"); return p.length === 3 ? p[2] + "/" + p[1] + "/" + p[0] : iso; }
-
-function renderPoidsParcelles(){
-  stopGps();
-  app.innerHTML = `
-    <header>
-      <div class="back-row">
-        <button class="back-btn" id="backBtn">‹</button>
-      </div>
-      <p class="eyebrow">Récolte</p>
-      <h1>Poids après récolte</h1>
-    </header>
-    <main>
-      <p class="subtitle">Choisis la parcelle.</p>
-      <div class="parcel-grid">${listeParcellesHTML()}</div>
-    </main>
-  `;
-  document.getElementById("backBtn").addEventListener("click", renderChoice);
-  app.querySelectorAll(".parcel-card").forEach(btn => {
-    btn.addEventListener("click", () => renderPoidsSaisie(RECOLTE_PARCELLES[parseInt(btn.dataset.idx)]));
-  });
-}
 
 // Détail d'une ligne (une date) : une ligne de texte par parcelle ayant des poids
 function detailPoidsHTML(r, parcelles){
   const lignes = (parcelles || []).filter(p => r.v && r.v[p.key]).map(p => {
     const v = r.v[p.key], m = [];
     if(v.brut) m.push("brut " + fmtN(v.brut));
+    if(v.lave) m.push("lavé " + fmtN(v.lave));
     if(v.net) m.push("net " + fmtN(v.net));
     return "<b>" + escapeHtml(p.label) + "</b> : " + (m.join(" · ") || "—") + (v.commentaire ? " — <i>" + escapeHtml(v.commentaire) + "</i>" : "");
   });
   return lignes.length ? lignes.join("<br>") : "&nbsp;";
 }
 
-function pertePct(brut, net){
-  return brut > 0 ? Math.round((1 - net / brut) * 100) + " %" : "—";
+function resumeLignePoids(r){
+  return "brut " + fmtN(r.totalBrut) + " · lavé " + fmtN(r.totalLave) + " · net " + fmtN(r.totalNet) + " g";
 }
 
 let signaturePeseesConnue = null;
@@ -1800,7 +1829,7 @@ function rendreListePesees(d){
       ${d.rows.map(r => `
         <div class="total-row recent-row">
           <span class="t-label">${escapeHtml(r.date)}</span>
-          <span class="t-value">brut ${fmtN(r.totalBrut)} · net ${fmtN(r.totalNet)} g</span>
+          <span class="t-value">${resumeLignePoids(r)}</span>
         </div>
         <div class="recent-sub">${detailPoidsHTML(r, d.parcelles)}</div>
       `).join("")}
@@ -1813,15 +1842,17 @@ async function lirePesees(){
   return d;
 }
 
-function renderPoidsSaisie(parcelle){
+// Une seule page : date, parcelle, type de poids, poids, commentaire.
+function renderPoidsSaisie(){
+  stopGps();
   const needsSetup = SCRIPT_URL.indexOf("COLLE_ICI") === 0;
   app.innerHTML = `
     <header class="compact">
       <div class="back-row">
         <button class="back-btn" id="backBtn">‹</button>
       </div>
-      <p class="eyebrow">Poids après récolte</p>
-      <h1>${escapeHtml(parcelle)}</h1>
+      <p class="eyebrow">Récolte</p>
+      <h1>Poids après récolte</h1>
     </header>
     <main class="compact">
       ${needsSetup ? `<div class="setup-banner">⚠️ L'URL du script Google n'est pas encore configurée.</div>` : ""}
@@ -1831,9 +1862,15 @@ function renderPoidsSaisie(parcelle){
           <input type="date" id="v_date" value="${todayISO()}" required>
         </div>
         <div class="field">
+          <label>Parcelle</label>
+          <div class="type-seg parc-seg" id="parcSeg">
+            ${RECOLTE_PARCELLES.map(p => `<button type="button" data-parc="${escapeHtml(p)}">${escapeHtml(p)}</button>`).join("")}
+          </div>
+        </div>
+        <div class="field">
           <label>Type de poids</label>
-          <div class="type-seg" id="typeSeg">
-            ${TYPES_POIDS_UI.map(t => `<button type="button" data-type="${t.id}" class="${t.id === typePoidsChoisi ? 'on' : ''}">${escapeHtml(t.court)}</button>`).join("")}
+          <div class="type-seg tri" id="typeSeg">
+            ${TYPES_POIDS_UI.map(t => `<button type="button" data-type="${t.id}">${escapeHtml(t.court)}</button>`).join("")}
           </div>
           <p class="type-aide" id="typeAide"></p>
         </div>
@@ -1853,15 +1890,21 @@ function renderPoidsSaisie(parcelle){
       <div id="recentPesees"><p class="loading-msg">Chargement…</p></div>
     </main>
   `;
-  document.getElementById("backBtn").addEventListener("click", renderPoidsParcelles);
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
 
   const aide = document.getElementById("typeAide");
-  function majType(){
+  function majChoix(){
     app.querySelectorAll("#typeSeg button").forEach(b => b.classList.toggle("on", b.dataset.type === typePoidsChoisi));
+    app.querySelectorAll("#parcSeg button").forEach(b => b.classList.toggle("on", b.dataset.parc === parcellePoidsChoisie));
     aide.textContent = TYPES_POIDS_UI.find(t => t.id === typePoidsChoisi).aide;
   }
-  app.querySelectorAll("#typeSeg button").forEach(b => b.addEventListener("click", () => { typePoidsChoisi = b.dataset.type; majType(); }));
-  majType();
+  app.querySelectorAll("#typeSeg button").forEach(b => b.addEventListener("click", () => { typePoidsChoisi = b.dataset.type; majChoix(); }));
+  app.querySelectorAll("#parcSeg button").forEach(b => b.addEventListener("click", () => {
+    parcellePoidsChoisie = b.dataset.parc;
+    try{ localStorage.setItem("poids_parcelle", parcellePoidsChoisie); }catch(e){}
+    majChoix();
+  }));
+  majChoix();
 
   const statusEl = document.getElementById("poidsStatus");
   const saveBtn = document.getElementById("poidsSaveBtn");
@@ -1875,7 +1918,7 @@ function renderPoidsSaisie(parcelle){
     if(!(poids > 0)){
       statusEl.textContent = "⚠️ Renseigne un poids supérieur à 0 (en grammes)."; statusEl.className = "status err"; return;
     }
-    const type = typePoidsChoisi;
+    const type = typePoidsChoisi, parcelle = parcellePoidsChoisie;
     const dateIso = document.getElementById("v_date").value;
     saveBtn.disabled = true;
     statusEl.textContent = "Enregistrement…"; statusEl.className = "status pending";
@@ -1919,7 +1962,7 @@ function renderPoidsSaisie(parcelle){
       const ligne = (conf.rows || []).find(r => r.date === dateFR(dateIso));
       const v = ligne && ligne.v && ligne.v[CLES_PARCELLES[parcelle]];
       const cumul = v && v[type] ? " — cumul du jour : " + fmtG(v[type]) : "";
-      statusEl.textContent = "✓ " + info.aide + " enregistré dans le Sheet : " + fmtG(poids) + " (" + parcelle + ")" + cumul;
+      statusEl.textContent = "✓ " + info.court + " enregistré dans le Sheet : " + fmtG(poids) + " (" + parcelle + ")" + cumul;
       statusEl.className = "status ok";
       document.getElementById("v_poids").value = "";
       document.getElementById("v_comment").value = "";
@@ -1964,22 +2007,24 @@ async function renderConsultationPoids(){
     return;
   }
   const lignesParcelles = (t.parcelles || []).map(p => {
-    const x = (t.totaux && t.totaux[p.key]) || { recolte: 0, brut: 0, net: 0 };
-    return `<tr><td>${escapeHtml(p.label)}</td><td>${fmtN(x.brut)}</td><td>${fmtN(x.net)}</td><td>${pertePct(x.brut, x.net)}</td></tr>`;
+    const x = (t.totaux && t.totaux[p.key]) || { brut: 0, lave: 0, net: 0 };
+    const perte = (x.pLave > 0 && x.pNet > 0) ? 1 - x.pNet / x.pLave : null;
+    return `<tr><td>${escapeHtml(p.label)}</td><td>${fmtN(x.brut)}</td><td>${fmtN(x.lave)}</td><td>${fmtN(x.net)}</td><td>${fmtPerte(perte)}</td></tr>`;
   }).join("");
   body.innerHTML = `
     <div class="gros-totaux">
-      <div class="gt"><span class="gt-label">Total brut</span><span class="gt-val">${fmtG(t.totalBrut)}</span></div>
+      <div class="gt"><span class="gt-label">Total brut non lavé</span><span class="gt-val">${fmtG(t.totalBrut)}</span></div>
+      <div class="gt"><span class="gt-label">Total lavé non trié</span><span class="gt-val">${fmtG(t.totalLave)}</span></div>
       <div class="gt"><span class="gt-label">Total net vendable</span><span class="gt-val">${fmtG(t.totalNet)}</span></div>
-      <div class="gt" style="grid-column:1 / -1;"><span class="gt-label">Perte (brut → net vendable)</span><span class="gt-val">${pertePct(t.totalBrut, t.totalNet)}</span></div>
+      <div class="gt"><span class="gt-label">% de perte <span style="text-transform:none;letter-spacing:0;">(moyenne)</span></span><span class="gt-val">${fmtPerte(t.perte)}</span></div>
     </div>
 
-    <p class="section-title">Totaux par parcelle <span class="unit">(grammes)</span></p>
+    <p class="section-title">Totaux par parcelle <span class="unit">(grammes · perte = lavé → net, dates complètes)</span></p>
     <table class="bilan-table" style="margin-bottom:18px;">
-      <thead><tr><th>Parcelle</th><th>Brut</th><th>Net</th><th>Perte</th></tr></thead>
+      <thead><tr><th>Parcelle</th><th>Brut</th><th>Lavé</th><th>Net</th><th>Perte</th></tr></thead>
       <tbody>
         ${lignesParcelles}
-        <tr><td>TOTAL</td><td>${fmtN(t.totalBrut)}</td><td>${fmtN(t.totalNet)}</td><td>${pertePct(t.totalBrut, t.totalNet)}</td></tr>
+        <tr><td>TOTAL</td><td>${fmtN(t.totalBrut)}</td><td>${fmtN(t.totalLave)}</td><td>${fmtN(t.totalNet)}</td><td>${fmtPerte(t.perte)}</td></tr>
       </tbody>
     </table>
 
@@ -1988,11 +2033,203 @@ async function renderConsultationPoids(){
       ${t.rows.map(r => `
         <div class="total-row recent-row">
           <span class="t-label">${escapeHtml(r.date)}</span>
-          <span class="t-value">brut ${fmtN(r.totalBrut)} · net ${fmtN(r.totalNet)} g</span>
+          <span class="t-value">${resumeLignePoids(r)}</span>
         </div>
         <div class="recent-sub">${detailPoidsHTML(r, t.parcelles)}</div>
       `).join("")}
     </div>
+  `;
+}
+
+/* ---------- Vente : qualité, prix au kg, poids ---------- */
+const QUALITES_VENTE_UI = ["Brisure", "Morceaux", "2e choix", "1er choix", "Extra"];
+const CLES_QUALITES = { "Brisure": "brisure", "Morceaux": "morceaux", "2e choix": "choix2", "1er choix": "choix1", "Extra": "extra" };
+let signatureVentesConnue = null;
+
+function detailVenteHTML(r, qualites){
+  const l = (qualites || []).filter(q => r.q && r.q[q.key]).map(q => {
+    const v = r.q[q.key];
+    return "<b>" + escapeHtml(q.label) + "</b> : " + fmtN(v.poids) + " g à " + fmtEur(v.prix) + "/kg";
+  });
+  return l.length ? l.join("<br>") : "&nbsp;";
+}
+
+function rendreListeVentes(d){
+  const box = document.getElementById("recentVentes");
+  if(!box) return;
+  if(!d || !d.rows || d.rows.length === 0){ box.innerHTML = `<p class="loading-msg">Aucune vente pour le moment.</p>`; return; }
+  box.innerHTML = `
+    <div class="total-list">
+      ${d.rows.map(r => `
+        <div class="total-row recent-row">
+          <span class="t-label">${escapeHtml(r.date)}</span>
+          <span class="t-value">${fmtEur(r.euros)} · ${fmtN(r.g)} g</span>
+        </div>
+        <div class="recent-sub">${detailVenteHTML(r, d.qualites)}</div>
+      `).join("")}
+    </div>
+  `;
+}
+async function lireVentes(){
+  const d = await fetchJSONP("dernieresVentes");
+  signatureVentesConnue = d.signature;
+  return d;
+}
+
+function renderVenteSaisie(){
+  stopGps();
+  const needsSetup = SCRIPT_URL.indexOf("COLLE_ICI") === 0;
+  app.innerHTML = `
+    <header class="compact">
+      <div class="back-row">
+        <button class="back-btn" id="backBtn">‹</button>
+      </div>
+      <p class="eyebrow">Vente</p>
+      <h1>Saisie vente</h1>
+    </header>
+    <main class="compact">
+      ${needsSetup ? `<div class="setup-banner">⚠️ L'URL du script Google n'est pas encore configurée.</div>` : ""}
+      <form id="venteForm" class="heures-compact">
+        <div class="field">
+          <label>Date</label>
+          <input type="date" id="vt_date" value="${todayISO()}" required>
+        </div>
+        <div class="vente-grid">
+          <span class="vg-h"></span><span class="vg-h">Prix <span class="unit">(€/kg)</span></span><span class="vg-h">Poids <span class="unit">(g)</span></span>
+          ${QUALITES_VENTE_UI.map((q, i) => `
+            <span class="vg-q">${escapeHtml(q)}</span>
+            <input type="number" inputmode="decimal" step="0.01" min="0" id="vt_prix_${i}" placeholder="€/kg" aria-label="Prix ${escapeHtml(q)}">
+            <input type="number" inputmode="numeric" step="1" min="0" id="vt_poids_${i}" placeholder="g" aria-label="Poids ${escapeHtml(q)}">
+          `).join("")}
+        </div>
+        <p class="type-aide">Remplis seulement les qualités vendues.</p>
+        <button type="submit" class="save-btn" id="venteSaveBtn" style="background:#980000;">Enregistrer</button>
+        <div class="status" id="venteStatus"></div>
+      </form>
+
+      <p class="section-title" style="margin-top:20px;">Dernières dates <span class="unit">(pour contrôle)</span></p>
+      <div id="recentVentes"><p class="loading-msg">Chargement…</p></div>
+    </main>
+  `;
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
+  const statusEl = document.getElementById("venteStatus");
+  const saveBtn = document.getElementById("venteSaveBtn");
+  const num = id => parseFloat(String(document.getElementById(id).value).replace(",", "."));
+
+  document.getElementById("venteForm").addEventListener("submit", async ev => {
+    ev.preventDefault();
+    if(SCRIPT_URL.indexOf("COLLE_ICI") === 0){
+      statusEl.textContent = "⚠️ Configure d'abord l'URL du script."; statusEl.className = "status err"; return;
+    }
+    const lignes = [];
+    for(let i = 0; i < QUALITES_VENTE_UI.length; i++){
+      const prix = num("vt_prix_" + i), poids = num("vt_poids_" + i);
+      const aPrix = prix > 0, aPoids = poids > 0;
+      if(aPrix !== aPoids){
+        statusEl.textContent = "⚠️ " + QUALITES_VENTE_UI[i] + " : renseigne le prix ET le poids.";
+        statusEl.className = "status err"; return;
+      }
+      if(aPrix) lignes.push({ qualite: QUALITES_VENTE_UI[i], prix: Math.round(prix * 100) / 100, poids: Math.round(poids) });
+    }
+    if(!lignes.length){
+      statusEl.textContent = "⚠️ Renseigne au moins une qualité (prix et poids)."; statusEl.className = "status err"; return;
+    }
+    const dateIso = document.getElementById("vt_date").value;
+    saveBtn.disabled = true;
+    statusEl.textContent = "Enregistrement…"; statusEl.className = "status pending";
+
+    let avant = signatureVentesConnue;
+    if(avant === null){ try{ avant = (await lireVentes()).signature; }catch(e){ avant = null; } }
+
+    try{
+      await fetch(SCRIPT_URL, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ mode: "vente", date: dateIso, lignes: lignes })
+      });
+    } catch(err){
+      statusEl.textContent = "✗ Échec de l'envoi — vérifie ta connexion et réessaie.";
+      statusEl.className = "status err";
+      saveBtn.disabled = false;
+      return;
+    }
+
+    const attendu = lignes.reduce((s, l) => s + l.poids, 0);
+    let conf = null;
+    for(let i = 0; i < 4 && !conf; i++){
+      await attendre(i === 0 ? 500 : 900);
+      try{
+        const d = await lireVentes();
+        rendreListeVentes(d);
+        if(avant !== null && d.signature >= avant + attendu) conf = d;
+      }catch(e){ /* nouvelle tentative */ }
+    }
+    if(conf){
+      const euros = lignes.reduce((s, l) => s + l.prix * l.poids / 1000, 0);
+      statusEl.textContent = "✓ Vente enregistrée dans le Sheet : " + fmtG(attendu) + " pour " + fmtEur(euros) + " (" + lignes.map(l => l.qualite).join(", ") + ")";
+      statusEl.className = "status ok";
+      QUALITES_VENTE_UI.forEach((q, i) => { document.getElementById("vt_prix_" + i).value = ""; document.getElementById("vt_poids_" + i).value = ""; });
+      vibrer([80, 60, 160]);
+    } else {
+      statusEl.textContent = "Envoyée, mais non confirmée par le Sheet — vérifie la liste ci-dessous (ou lance « verifierOngletVente » dans le script).";
+      statusEl.className = "status err";
+    }
+    saveBtn.disabled = false;
+  });
+
+  lireVentes().then(rendreListeVentes).catch(() => {
+    const box = document.getElementById("recentVentes");
+    if(box) box.innerHTML = `<p class="error-msg">✗ Impossible de charger les dernières dates.</p>`;
+  });
+}
+
+// Consultation : le tableau rouge du haut de l'onglet « Vente » (totaux / moyennes de chaque colonne)
+async function renderConsultationVente(){
+  app.innerHTML = `
+    <header class="compact">
+      <div class="back-row">
+        <button class="back-btn" id="backBtn">‹</button>
+      </div>
+      <h1>Ventes</h1>
+    </header>
+    <main class="compact">
+      <div id="venteConsultBody"><p class="loading-msg">Chargement…</p></div>
+    </main>
+  `;
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
+  const body = document.getElementById("venteConsultBody");
+  let t;
+  try{
+    t = await fetchJSONP("tableauVente");
+  }catch(err){
+    body.innerHTML = `<p class="error-msg">✗ Impossible de charger le tableau — vérifie ta connexion et réessaie.</p>`;
+    return;
+  }
+  if(!t.rows || t.rows.length === 0){
+    body.innerHTML = `<p class="loading-msg">Aucune vente enregistrée pour le moment.</p>`;
+    return;
+  }
+  const tx = t.totaux || { q: {} };
+  const lignes = (t.qualites || []).map(q => {
+    const x = (tx.q && tx.q[q.key]) || {};
+    return `<tr><td>${escapeHtml(q.label)}</td><td>${fmtEurOuTiret(x.moyenne)}</td><td>${fmtN(x.total)}</td></tr>`;
+  }).join("");
+  body.innerHTML = `
+    <div class="gros-totaux red">
+      <div class="gt"><span class="gt-label">Total vente</span><span class="gt-val">${fmtEur(tx.euros)}</span></div>
+      <div class="gt"><span class="gt-label">Prix de vente moyen</span><span class="gt-val">${fmtEurOuTiret(tx.moyenne)}<small>/kg</small></span></div>
+      <div class="gt" style="grid-column:1 / -1;"><span class="gt-label">Total poids vendu</span><span class="gt-val">${fmtG(tx.g)}</span></div>
+    </div>
+    <p class="section-title">Par qualité <span class="unit">(moyenne du prix au kg · poids total en g)</span></p>
+    <table class="bilan-table red-table">
+      <thead><tr><th>Qualité</th><th>Prix moyen /kg</th><th>Poids total (g)</th></tr></thead>
+      <tbody>
+        ${lignes}
+        <tr><td>TOTAL</td><td>${fmtEurOuTiret(tx.moyenne)}</td><td>${fmtN(tx.g)}</td></tr>
+      </tbody>
+    </table>
+    <p class="type-aide" style="margin-top:8px;">${t.rows.length} date${t.rows.length > 1 ? "s" : ""} de vente · totaux et moyennes de toutes les colonnes du Sheet.</p>
   `;
 }
 

@@ -2045,6 +2045,9 @@ async function renderConsultationPoids(){
 const QUALITES_VENTE_UI = ["Brisure", "Morceaux", "2e choix", "1er choix", "Extra"];
 const CLES_QUALITES = { "Brisure": "brisure", "Morceaux": "morceaux", "2e choix": "choix2", "1er choix": "choix1", "Extra": "extra" };
 let signatureVentesConnue = null;
+const CLIENTS_DEFAUT = ["Particulier", "Restaurateur", "Grossiste", "Marché", "Autre professionnel"];
+let clientsVente = CLIENTS_DEFAUT.slice();
+let clientVenteChoisi = "";
 
 function detailVenteHTML(r, qualites){
   const l = (qualites || []).filter(q => r.q && r.q[q.key]).map(q => {
@@ -2062,7 +2065,7 @@ function rendreListeVentes(d){
     <div class="total-list">
       ${d.rows.map(r => `
         <div class="total-row recent-row">
-          <span class="t-label">${escapeHtml(r.date)}</span>
+          <span class="t-label">${escapeHtml(r.date)}${r.client ? " · " + escapeHtml(r.client) : ""}</span>
           <span class="t-value">${fmtEur(r.euros)} · ${fmtN(r.g)} g</span>
         </div>
         <div class="recent-sub">${detailVenteHTML(r, d.qualites)}</div>
@@ -2094,6 +2097,11 @@ function renderVenteSaisie(){
           <label>Date</label>
           <input type="date" id="vt_date" value="${todayISO()}" required>
         </div>
+        <div class="field">
+          <label>Client</label>
+          <select id="vt_client"></select>
+          <input type="text" id="vt_client_autre" placeholder="Nom du nouveau client" autocomplete="off" style="display:none;margin-top:6px;">
+        </div>
         <div class="vente-grid">
           <span class="vg-h"></span><span class="vg-h">Prix <span class="unit">(€/kg)</span></span><span class="vg-h">Poids <span class="unit">(g)</span></span>
           ${QUALITES_VENTE_UI.map((q, i) => `
@@ -2114,6 +2122,24 @@ function renderVenteSaisie(){
   document.getElementById("backBtn").addEventListener("click", renderChoice);
   const statusEl = document.getElementById("venteStatus");
   const saveBtn = document.getElementById("venteSaveBtn");
+  const selClient = document.getElementById("vt_client"), inClient = document.getElementById("vt_client_autre");
+  function remplirClients(){
+    const liste = clientsVente.slice();
+    if(clientVenteChoisi && liste.indexOf(clientVenteChoisi) === -1) liste.push(clientVenteChoisi);
+    selClient.innerHTML = `<option value="">— non précisé —</option>` +
+      liste.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("") +
+      `<option value="__autre__">＋ Autre (saisir un nom)…</option>`;
+    selClient.value = clientVenteChoisi;
+  }
+  remplirClients();
+  selClient.addEventListener("change", () => {
+    const autre = selClient.value === "__autre__";
+    inClient.style.display = autre ? "block" : "none";
+    if(autre) inClient.focus(); else clientVenteChoisi = selClient.value;
+  });
+  fetchJSONP("listesVente").then(d => {
+    if(d && d.clients && d.clients.length){ clientsVente = d.clients; remplirClients(); }
+  }).catch(() => {});
   const num = id => parseFloat(String(document.getElementById(id).value).replace(",", "."));
 
   document.getElementById("venteForm").addEventListener("submit", async ev => {
@@ -2135,6 +2161,11 @@ function renderVenteSaisie(){
       statusEl.textContent = "⚠️ Renseigne au moins une qualité (prix et poids)."; statusEl.className = "status err"; return;
     }
     const dateIso = document.getElementById("vt_date").value;
+    let client = selClient.value;
+    if(client === "__autre__"){
+      client = inClient.value.trim();
+      if(!client){ statusEl.textContent = "⚠️ Saisis le nom du nouveau client."; statusEl.className = "status err"; return; }
+    }
     saveBtn.disabled = true;
     statusEl.textContent = "Enregistrement…"; statusEl.className = "status pending";
 
@@ -2146,7 +2177,7 @@ function renderVenteSaisie(){
         method: "POST",
         mode: "no-cors",
         headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({ mode: "vente", date: dateIso, lignes: lignes })
+        body: JSON.stringify({ mode: "vente", date: dateIso, client: client, lignes: lignes })
       });
     } catch(err){
       statusEl.textContent = "✗ Échec de l'envoi — vérifie ta connexion et réessaie.";
@@ -2167,7 +2198,10 @@ function renderVenteSaisie(){
     }
     if(conf){
       const euros = lignes.reduce((s, l) => s + l.prix * l.poids / 1000, 0);
-      statusEl.textContent = "✓ Vente enregistrée dans le Sheet : " + fmtG(attendu) + " pour " + fmtEur(euros) + " (" + lignes.map(l => l.qualite).join(", ") + ")";
+      statusEl.textContent = "✓ Vente enregistrée dans le Sheet : " + fmtG(attendu) + " pour " + fmtEur(euros) + " (" + lignes.map(l => l.qualite).join(", ") + ")" + (client ? " — " + client : "");
+      clientVenteChoisi = client;
+      if(client && clientsVente.indexOf(client) === -1) clientsVente.push(client);
+      inClient.value = ""; inClient.style.display = "none"; remplirClients();
       statusEl.className = "status ok";
       QUALITES_VENTE_UI.forEach((q, i) => { document.getElementById("vt_prix_" + i).value = ""; document.getElementById("vt_poids_" + i).value = ""; });
       vibrer([80, 60, 160]);
