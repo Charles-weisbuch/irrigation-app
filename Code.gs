@@ -167,7 +167,9 @@ function doGet(e) {
     dernieresPesees: obtenirDernieresPesees,
     tableauPoids: obtenirTableauPoids,
     dernieresVentes: obtenirDernieresVentes,
-    tableauVente: obtenirTableauVente
+    tableauVente: obtenirTableauVente,
+    listesVente: obtenirListesVente,
+    urlFichier: function () { return { url: SpreadsheetApp.getActiveSpreadsheet().getUrl() }; }
   };
   if (actionsRecolte[action]) {
     var json5 = JSON.stringify(actionsRecolte[action]());
@@ -1168,13 +1170,14 @@ function analyserOngletVente(sheet) {
     dernierQ = Math.max(dernierQ, pc + 1);
   }
 
-  var colEuros = 0, colMoy = 0, colG = 0;
+  var colEuros = 0, colMoy = 0, colG = 0, clientCol = 0, listCol = 0;
   for (c = dernierQ; c < lastCol; c++) {
     var label = "";
     for (r = 0; r < headerRow; r++) label += " " + txt(r, c);
     label = label.trim();
     if (!label) continue;
-    if (/moyen/.test(label)) { if (!colMoy) colMoy = c + 1; }
+    if (/client/.test(label)) { if (/liste/.test(label)) { if (!listCol) listCol = c + 1; } else if (!clientCol) clientCol = c + 1; }
+    else if (/moyen/.test(label)) { if (!colMoy) colMoy = c + 1; }
     else if (/total/.test(label) && /vente|€|eur/.test(label)) { if (!colEuros) colEuros = c + 1; }
     else if (/total/.test(label) && /\bg\b|poids|vendu/.test(label)) { if (!colG) colG = c + 1; }
   }
@@ -1192,8 +1195,8 @@ function analyserOngletVente(sheet) {
 
   return {
     dateCol: 1, groupRow: groupRow, headerRow: headerRow, startRow: headerRow + 1, totalsRow: totalsRow,
-    cols: cols, colEuros: colEuros, colMoy: colMoy, colG: colG,
-    dernierCol: Math.max(colEuros, colMoy, colG, dernierQ)
+    cols: cols, colEuros: colEuros, colMoy: colMoy, colG: colG, clientCol: clientCol, listCol: listCol,
+    dernierCol: Math.max(colEuros, colMoy, colG, dernierQ, clientCol)
   };
 }
 
@@ -1217,6 +1220,65 @@ function infosOngletVente(creer) {
   info.sheet = sheet;
   info.tz = ss.getSpreadsheetTimeZone();
   return info;
+}
+
+// Clients : colonne « Client » (à droite de « Total poids vendu ») et liste des noms proposés dans
+// l'appli (colonne « Liste clients », éditable à la main : une ligne = un nom). Créées si absentes.
+var CLIENTS_PAR_DEFAUT = ["Particulier", "Restaurateur", "Grossiste", "Marché", "Autre professionnel"];
+
+function lireListeClients(info) {
+  if (!info.listCol) return [];
+  var n = Math.max(1, Math.min(300, info.sheet.getMaxRows() - info.startRow + 1));
+  var v = info.sheet.getRange(info.startRow, info.listCol, n, 1).getValues(), out = [];
+  for (var i = 0; i < v.length; i++) { var t = (v[i][0] || "").toString().trim(); if (t) out.push(t); }
+  return out;
+}
+
+function assurerColonnesClient(info) {
+  var sheet = info.sheet, modifie = false;
+  function colLibre(depuis) {
+    var col = depuis;
+    while ((sheet.getRange(info.headerRow, col).getValue() || "") !== "") col++;
+    return col;
+  }
+  if (!info.clientCol) {
+    var cc = colLibre(Math.max(info.colEuros, info.colMoy, info.colG) + 1);
+    sheet.getRange(info.headerRow, cc).setValue("Client").setFontWeight("bold");
+    info.clientCol = cc; modifie = true;
+  }
+  if (!info.listCol) {
+    var lc = colLibre(info.clientCol + 2);
+    sheet.getRange(info.headerRow, lc).setValue("Liste clients").setFontWeight("bold");
+    info.listCol = lc; modifie = true;
+  }
+  if (!lireListeClients({ sheet: sheet, startRow: info.startRow, listCol: info.listCol }).length) {
+    sheet.getRange(info.startRow, info.listCol, CLIENTS_PAR_DEFAUT.length, 1)
+      .setValues(CLIENTS_PAR_DEFAUT.map(function (x) { return [x]; }));
+  }
+  if (!modifie) return info;
+  var neuf = analyserOngletVente(sheet);
+  if (neuf.error) return neuf;
+  neuf.sheet = sheet; neuf.tz = info.tz;
+  return neuf;
+}
+
+function ajouterClientSiNouveau(info, nom) {
+  if (!nom) return;
+  var liste = lireListeClients(info), k = normTxt(nom);
+  for (var i = 0; i < liste.length; i++) if (normTxt(liste[i]) === k) return;
+  var n = Math.max(1, Math.min(300, info.sheet.getMaxRows() - info.startRow + 1));
+  var v = info.sheet.getRange(info.startRow, info.listCol, n, 1).getValues();
+  for (var j = 0; j < v.length; j++) {
+    if (!(v[j][0] || "").toString().trim()) { info.sheet.getRange(info.startRow + j, info.listCol).setValue(nom); return; }
+  }
+}
+
+function obtenirListesVente() {
+  var info = infosOngletVente(true);
+  if (info.error) return { clients: CLIENTS_PAR_DEFAUT.slice() };
+  info = assurerColonnesClient(info);
+  if (info.error) return { clients: CLIENTS_PAR_DEFAUT.slice() };
+  return { clients: lireListeClients(info) };
 }
 
 // Formules attendues pour une ligne de date : total € = Σ prix × poids / 1000 ; moyenne €/kg ; total g
@@ -1275,6 +1337,9 @@ function assurerTotauxVente(info) {
 function handleVente(data) {
   var info = infosOngletVente(true);
   if (info.error) return jsonOutput({ ok: false, error: info.error });
+  info = assurerColonnesClient(info);
+  if (info.error) return jsonOutput({ ok: false, error: info.error });
+  var client = (data.client || "").toString().trim();
   if (!data.date) return jsonOutput({ ok: false, error: "Date manquante." });
   var lignes = data.lignes || [];
   if (!lignes.length) return jsonOutput({ ok: false, error: "Aucune qualité renseignée." });
@@ -1297,7 +1362,8 @@ function handleVente(data) {
     if (d === "" || d === null) { nextFree = start + i; break; }
     if (d instanceof Date) {
       var j = jourStr(d, tz);
-      if (j === jour && rowSame === -1) rowSame = start + i;
+      // une ligne par DATE et par CLIENT : même jour mais autre client = nouvelle ligne
+      if (j === jour && rowSame === -1 && normTxt(bloc[i][info.clientCol - 1]) === normTxt(client)) rowSame = start + i;
       if (j > jour && insertion === -1) insertion = start + i;
     }
   }
@@ -1312,7 +1378,9 @@ function handleVente(data) {
     target = insertion !== -1 ? insertion : nextFree;
     if (insertion !== -1) shiftBlockRowsDown(sheet, 1, info.dernierCol, insertion, nextFree);
     sheet.getRange(target, 1).setValue(parseDateOnly(data.date)).setNumberFormat(FORMAT_DATE);
+    if (client) sheet.getRange(target, info.clientCol).setValue(client);
   }
+  ajouterClientSiNouveau(info, client);
 
   propres.forEach(function (p) {
     var cp = sheet.getRange(target, info.cols[p.key].prix), cw = sheet.getRange(target, info.cols[p.key].poids);
@@ -1343,7 +1411,7 @@ function lireTableauVente(info) {
   for (var i = 0; i < vals.length; i++) {
     var d = vals[i][0];
     if (d === "" || d === null) break;
-    var ligne = { date: d instanceof Date ? formatDateFR(d) : d, q: {}, euros: 0, moyenne: null, g: 0 };
+    var ligne = { date: d instanceof Date ? formatDateFR(d) : d, client: info.clientCol ? (vals[i][info.clientCol - 1] || "").toString() : "", q: {}, euros: 0, moyenne: null, g: 0 };
     var eurosCalc = 0, gCalc = 0;
     QUALITES_VENTE.forEach(function (q) {
       var p = Number(vals[i][info.cols[q.key].prix - 1]), w = Number(vals[i][info.cols[q.key].poids - 1]);
@@ -1403,6 +1471,7 @@ function verifierOngletVente() {
     QUALITES_VENTE.forEach(function (q) {
       lignes.push(q.label + " : prix/kg=" + columnToLetter(info.cols[q.key].prix) + " · poids=" + columnToLetter(info.cols[q.key].poids));
     });
+    lignes.push("Client : " + (info.clientCol ? "colonne " + columnToLetter(info.clientCol) : "(sera créée à la première vente)") + " · liste des clients : " + (info.listCol ? "colonne " + columnToLetter(info.listCol) : "(sera créée)"));
     lignes.push("Total vente € : " + columnToLetter(info.colEuros) + " · prix moyen : " + columnToLetter(info.colMoy) + " · total poids : " + columnToLetter(info.colG));
   }
   Logger.log(lignes.join("\n"));
