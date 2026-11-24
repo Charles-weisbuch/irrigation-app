@@ -191,8 +191,25 @@ var LABELS_LIGNE = {
   "Bousquet et Riou": { 1: "Bousquet", 2: "Riou" }
 };
 
+// Ligne d'en-tête « Mois » du tableau de bilan d'un bloc : d'abord AU-DESSUS des données (tableaux
+// en haut de l'onglet), sinon en dessous (ancienne disposition). -1 si introuvable.
+function trouverEnteteBilan(sheet, block) {
+  var col = block.blockCol;
+  var max = Math.min(sheet.getMaxRows(), block.headerRow + 120);
+  var vals = sheet.getRange(1, col, max, 1).getValues();
+  var r;
+  for (r = 0; r < block.headerRow - 1; r++) {
+    if (normTxt(vals[r][0]) === "mois") return r + 1;
+  }
+  for (r = block.headerRow; r < max; r++) {
+    if (normTxt(vals[r][0]) === "mois") return r + 1;
+  }
+  return -1;
+}
+
 // Récupère, pour les 11 blocs, le tableau de bilan mensuel déjà calculé (formules déjà
 // en place dans le Sheet) : Mois | Pluie (mm) | Arrosage (mm) | cumul | Besoins (Etc).
+// Toutes les lignes du tableau sont lues (mai à avril + la ligne TOTAL période estivale).
 function obtenirTousLesBilans() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var out = [];
@@ -205,24 +222,25 @@ function obtenirTousLesBilans() {
       var block = findLigneBlock(sheet, ligneIndex);
       if (!block) return;
 
-      var colMois = block.blockCol;
-      var headerRow2 = -1;
-      for (var r = block.headerRow; r < block.headerRow + 90; r++) {
-        var v = sheet.getRange(r, colMois).getValue();
-        if (v && v.toString().trim().toLowerCase() === "mois") { headerRow2 = r; break; }
-      }
+      var headerRow2 = trouverEnteteBilan(sheet, block);
       if (headerRow2 === -1) return;
 
-      var rows = sheet.getRange(headerRow2 + 1, colMois, 6, 5).getValues(); // 5 mois + TOTAL
-      var mois = rows.map(function (row) {
-        return {
-          mois: row[0] ? row[0].toString() : "",
+      var nb = Math.min(16, sheet.getMaxRows() - headerRow2);
+      var rows = sheet.getRange(headerRow2 + 1, block.blockCol, nb, 5).getValues();
+      var mois = [];
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var label = row[0] ? row[0].toString().trim() : "";
+        if (!label) break; // fin du tableau
+        mois.push({
+          mois: label,
+          total: /^total/i.test(label),
           pluie: Number(row[1]) || 0,
           arrosage: Number(row[2]) || 0,
           cumul: Number(row[3]) || 0,
           besoins: Number(row[4]) || 0
-        };
-      });
+        });
+      }
 
       var labels = LABELS_LIGNE[p.sheet] || {};
       out.push({
@@ -1779,223 +1797,6 @@ function importPluieMeteocielAout2026() {
   return results;
 }
 
-/* ---------- Reproduction du bilan mensuel (Pluie/Arrosage/cumul/Besoins) sous chaque ligne ---------- */
-// À exécuter une seule fois. Reproduit sous les 10 blocs restants (tous sauf La Fontaine
-// Ligne 1, qui contient déjà le modèle d'origine construit à la main) le même tableau :
-// Mois | Pluie (mm) | Arrosage (mm) | cumul pluie+arrosage | Besoins de plante Etc (mm).
-// Pluie (mm) et Arrosage (mm) sont des SUMIFS calculés sur les colonnes Date/Pluie(mm)/mm
-// du bloc concerné, pour chaque mois de mai à septembre 2026. Le fond des colonnes
-// Pluie (mm) et Arrosage (mm) reprend la couleur de la ligne (orange clair Ligne 1,
-// bleu clair Ligne 2, vert clair Ligne 3). Les besoins (Etc) sont les mêmes 5 valeurs pour
-// toutes les parcelles/lignes, comme dans le modèle d'origine.
-function ajouterBilanMensuel() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var results = [];
-
-  var mois = [
-    { nom: "Mai", num: 5, besoin: 59 },
-    { nom: "Juin", num: 6, besoin: 78 },
-    { nom: "Juillet", num: 7, besoin: 94 },
-    { nom: "Août", num: 8, besoin: 85 },
-    { nom: "Septembre", num: 9, besoin: 55 }
-  ];
-
-  var COULEURS_LIGNE = { 1: "#FCE5CD", 2: "#CFE2F3", 3: "#D9EAD3" };
-  var COULEUR_HEADER_BG = "#073763";
-  var COULEUR_HEADER_TXT = "#FFFFFF";
-
-  PARCELLES.forEach(function (p) {
-    var sheet = ss.getSheetByName(p.sheet);
-    if (!sheet) { results.push(p.sheet + " : onglet introuvable"); return; }
-
-    p.lignes.forEach(function (ligneIndex) {
-      if (p.sheet === "La Fontaine" && ligneIndex === 1) {
-        results.push(p.sheet + " Ligne 1 : déjà existant (modèle d'origine), ignoré.");
-        return;
-      }
-
-      var block = findLigneBlock(sheet, ligneIndex);
-      if (!block) { results.push(p.sheet + " Ligne " + ligneIndex + " : bloc introuvable"); return; }
-
-      var cols = blockColumns(block.blockCol);
-      var colMois = block.blockCol;         // même colonne que "Date"
-      var colPluieBilan = block.blockCol + 1;
-      var colArrosageBilan = block.blockCol + 2;
-      var colCumul = block.blockCol + 3;
-      var colBesoins = block.blockCol + 4;
-
-      // Cherche une zone de 7 lignes x 5 colonnes libre, en partant d'un point de départ
-      // estimé (même écart que le modèle d'origine), et en descendant si besoin.
-      var startRow = block.headerRow + 38;
-      var found = false;
-      for (var t = 0; t < 30; t++) {
-        var libre = true;
-        for (var rr = startRow; rr < startRow + 7 && libre; rr++) {
-          var rowVals = sheet.getRange(rr, colMois, 1, 5).getValues()[0];
-          for (var cc = 0; cc < rowVals.length; cc++) {
-            if (rowVals[cc] !== "" && rowVals[cc] !== null) { libre = false; break; }
-          }
-        }
-        if (libre) { found = true; break; }
-        startRow += 1;
-      }
-      if (!found) {
-        results.push(p.sheet + " Ligne " + ligneIndex + " : aucune zone libre trouvée, tableau NON ajouté.");
-        return;
-      }
-
-      var headerRow2 = startRow;
-      var headers = ["Mois", "Pluie (mm)", "Arrosage (mm)", "cumul pluie+arrosage", "Besoins de plante, sans pluie Etc (mm) = Kc x ETP"];
-      var headerRange = sheet.getRange(headerRow2, colMois, 1, 5);
-      headerRange.setValues([headers]);
-      headerRange.setBackground(COULEUR_HEADER_BG).setFontColor(COULEUR_HEADER_TXT).setFontWeight("bold");
-
-      var couleurLigne = COULEURS_LIGNE[ligneIndex] || "#FFFFFF";
-      var colDateLettre = columnToLetter(cols.date);
-      var colPluieLettre = columnToLetter(cols.pluie);
-      var colMmLettre = columnToLetter(cols.mm);
-      var plageDebut = block.dataStartRow;
-      var plageFin = block.dataStartRow + 300; // fenêtre large mais bornée (évite les colonnes entières)
-      var dateRange = colDateLettre + plageDebut + ":" + colDateLettre + plageFin;
-      var pluieRange = colPluieLettre + plageDebut + ":" + colPluieLettre + plageFin;
-      var mmRange = colMmLettre + plageDebut + ":" + colMmLettre + plageFin;
-
-      mois.forEach(function (m, idx) {
-        var r = headerRow2 + 1 + idx;
-        // Point-virgule comme séparateur d'arguments : ce classeur est en locale française,
-        // où Sheets attend ";" entre les arguments d'une fonction (la virgule sert de
-        // séparateur décimal). Une formule construite avec des virgules provoque une
-        // "Erreur d'analyse de formule".
-        var debut = "DATE(2026;" + m.num + ";1)";
-        var finExclusive = "DATE(2026;" + (m.num + 1) + ";1)"; // 1er du mois suivant (borne exclusive)
-
-        sheet.getRange(r, colMois).setValue(m.nom);
-
-        // SUMPRODUCT + IFERROR : ignore les cellules en erreur (ex. #REF! isolés plus loin
-        // dans le tableau) au lieu de faire planter tout le calcul, contrairement à SUMIFS
-        // sur une plage contenant ne serait-ce qu'une seule cellule en erreur.
-        // IFERROR englobe ici TOUTE l'opération (comparaisons de dates ET valeur à sommer),
-        // pas seulement la lecture des plages : ça protège aussi contre une comparaison
-        // texte/date invalide (ex. la cellule "TOTAL Juin" mélangée aux vraies dates), qui
-        // provoquerait sinon une #ERROR! non capturée par un IFERROR posé uniquement sur la plage.
-        // La borne haute est exclusive (< 1er du mois suivant) plutôt que <= dernier jour, pour
-        // rester correct même si une saisie du dernier jour du mois garde une heure résiduelle.
-        var pluieCell = sheet.getRange(r, colPluieBilan);
-        pluieCell.setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + pluieRange + ";0))");
-        pluieCell.setBackground(couleurLigne);
-
-        var arrosageCell = sheet.getRange(r, colArrosageBilan);
-        arrosageCell.setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + mmRange + ";0))");
-        arrosageCell.setBackground(couleurLigne);
-
-        var cumulCell = sheet.getRange(r, colCumul);
-        cumulCell.setFormula("=" + columnToLetter(colPluieBilan) + r + "+" + columnToLetter(colArrosageBilan) + r);
-
-        sheet.getRange(r, colBesoins).setValue(m.besoin);
-      });
-
-      var totalRow = headerRow2 + 1 + mois.length;
-      var firstDataRow2 = headerRow2 + 1;
-      var lastDataRow2 = headerRow2 + mois.length;
-
-      sheet.getRange(totalRow, colMois).setValue("TOTAL").setFontWeight("bold");
-      sheet.getRange(totalRow, colPluieBilan).setFormula("=SUM(" + columnToLetter(colPluieBilan) + firstDataRow2 + ":" + columnToLetter(colPluieBilan) + lastDataRow2 + ")").setFontWeight("bold");
-      sheet.getRange(totalRow, colArrosageBilan).setFormula("=SUM(" + columnToLetter(colArrosageBilan) + firstDataRow2 + ":" + columnToLetter(colArrosageBilan) + lastDataRow2 + ")").setFontWeight("bold");
-      sheet.getRange(totalRow, colCumul).setFormula("=SUM(" + columnToLetter(colCumul) + firstDataRow2 + ":" + columnToLetter(colCumul) + lastDataRow2 + ")").setFontWeight("bold");
-      sheet.getRange(totalRow, colBesoins).setFormula("=SUM(" + columnToLetter(colBesoins) + firstDataRow2 + ":" + columnToLetter(colBesoins) + lastDataRow2 + ")").setFontWeight("bold");
-
-      results.push(p.sheet + " Ligne " + ligneIndex + " : tableau ajouté à partir de la ligne " + headerRow2 + ".");
-    });
-  });
-
-  Logger.log(results.join("\n"));
-  return results;
-}
-
-/* ---------- Correction ponctuelle : formules du bilan mensuel déjà créé ---------- */
-// À exécuter si "ajouterBilanMensuel" a déjà été lancée et que les cellules Pluie (mm) /
-// Arrosage (mm) affichent une erreur de calcul. Repère chaque tableau déjà en place
-// (recherche du mot "Mois" dans la bonne colonne) et remplace uniquement les formules
-// Pluie/Arrosage/TOTAL par une version insensible aux erreurs isolées (IFERROR).
-// Ne touche ni aux en-têtes, ni aux couleurs, ni aux valeurs "Besoins" déjà en place.
-function corrigerFormulesBilanMensuel() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var results = [];
-
-  var mois = [
-    { nom: "Mai", num: 5 },
-    { nom: "Juin", num: 6 },
-    { nom: "Juillet", num: 7 },
-    { nom: "Août", num: 8 },
-    { nom: "Septembre", num: 9 }
-  ];
-
-  PARCELLES.forEach(function (p) {
-    var sheet = ss.getSheetByName(p.sheet);
-    if (!sheet) { results.push(p.sheet + " : onglet introuvable"); return; }
-
-    p.lignes.forEach(function (ligneIndex) {
-      if (p.sheet === "La Fontaine" && ligneIndex === 1) {
-        results.push(p.sheet + " Ligne 1 : modèle d'origine, ignoré.");
-        return;
-      }
-
-      var block = findLigneBlock(sheet, ligneIndex);
-      if (!block) { results.push(p.sheet + " Ligne " + ligneIndex + " : bloc introuvable"); return; }
-
-      var cols = blockColumns(block.blockCol);
-      var colMois = block.blockCol;
-      var colPluieBilan = block.blockCol + 1;
-      var colArrosageBilan = block.blockCol + 2;
-      var colCumul = block.blockCol + 3;
-
-      // Retrouve la ligne d'en-tête du bilan déjà créé (recherche "Mois" à partir de la
-      // zone estimée par ajouterBilanMensuel, en descendant si besoin).
-      var headerRow2 = -1;
-      var scanFrom = block.headerRow + 30;
-      for (var r = scanFrom; r < scanFrom + 60; r++) {
-        var v = sheet.getRange(r, colMois).getValue();
-        if (v && v.toString().trim().toLowerCase() === "mois") { headerRow2 = r; break; }
-      }
-      if (headerRow2 === -1) {
-        results.push(p.sheet + " Ligne " + ligneIndex + " : tableau de bilan introuvable, rien à corriger.");
-        return;
-      }
-
-      var colDateLettre = columnToLetter(cols.date);
-      var colPluieLettre = columnToLetter(cols.pluie);
-      var colMmLettre = columnToLetter(cols.mm);
-      var plageDebut = block.dataStartRow;
-      var plageFin = block.dataStartRow + 300;
-      var dateRange = colDateLettre + plageDebut + ":" + colDateLettre + plageFin;
-      var pluieRange = colPluieLettre + plageDebut + ":" + colPluieLettre + plageFin;
-      var mmRange = colMmLettre + plageDebut + ":" + colMmLettre + plageFin;
-
-      mois.forEach(function (m, idx) {
-        var r = headerRow2 + 1 + idx;
-        var debut = "DATE(2026;" + m.num + ";1)";
-        var finExclusive = "DATE(2026;" + (m.num + 1) + ";1)"; // 1er du mois suivant (borne exclusive)
-
-        sheet.getRange(r, colPluieBilan).setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + pluieRange + ";0))");
-        sheet.getRange(r, colArrosageBilan).setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + mmRange + ";0))");
-        sheet.getRange(r, colCumul).setFormula("=" + columnToLetter(colPluieBilan) + r + "+" + columnToLetter(colArrosageBilan) + r);
-      });
-
-      var totalRow = headerRow2 + 1 + mois.length;
-      var firstDataRow2 = headerRow2 + 1;
-      var lastDataRow2 = headerRow2 + mois.length;
-      sheet.getRange(totalRow, colPluieBilan).setFormula("=SUM(" + columnToLetter(colPluieBilan) + firstDataRow2 + ":" + columnToLetter(colPluieBilan) + lastDataRow2 + ")");
-      sheet.getRange(totalRow, colArrosageBilan).setFormula("=SUM(" + columnToLetter(colArrosageBilan) + firstDataRow2 + ":" + columnToLetter(colArrosageBilan) + lastDataRow2 + ")");
-      sheet.getRange(totalRow, colCumul).setFormula("=SUM(" + columnToLetter(colCumul) + firstDataRow2 + ":" + columnToLetter(colCumul) + lastDataRow2 + ")");
-
-      results.push(p.sheet + " Ligne " + ligneIndex + " : formules corrigées (tableau trouvé à la ligne " + headerRow2 + ").");
-    });
-  });
-
-  Logger.log(results.join("\n"));
-  return results;
-}
-
 /* ---------- Correction ponctuelle : nettoyer les dates déjà écrites (heure résiduelle) ---------- */
 // À exécuter si des dates déjà saisies affichent une heure (ex. "03/05/2026 15:00:00").
 // Ne touche qu'aux cellules contenant une vraie date (jamais aux textes comme "TOTAL Juin") :
@@ -2041,226 +1842,184 @@ function normaliserDatesExistantes() {
   return results;
 }
 
-/* ---------- Mise en forme ponctuelle : arrondir l'affichage des données ---------- */
-// À exécuter une seule fois. Applique un format "0" (arrondi à l'entier, sans décimale
-// affichée) sur les colonnes de données de chaque bloc (Durée, Compteur début, Compteur
-// fin, Débit, M3, mm, Pluie) ainsi que sur les tableaux de bilan mensuel (Pluie/Arrosage/
-// cumul/Besoins), pour les 4 onglets. Ne touche ni aux dates, ni aux heures (qui gardent
-// leur propre format), ni aux paramètres de parcelle (Surface/Longueur/Vitesse), pour ne
-// pas perdre leur précision. Ceci change uniquement l'AFFICHAGE, pas les valeurs stockées
-// ni les formules — les calculs restent faits avec la pleine précision.
-function arrondirAffichageDonnees() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var results = [];
+/* ---------- Tableaux récapitulatifs (Mois | Pluie | Arrosage | cumul | Besoins) EN HAUT des onglets ---------- */
+// Disposition (identique dans les 4 onglets) : lignes 1 à 14 = un tableau par ligne d'arrosage, placé
+// juste au-dessus de ses données (mêmes colonnes que le bloc) :
+//   ligne 1 : en-têtes · lignes 2 à 6 : mai à septembre · ligne 7 : TOTAL période estivale ·
+//   lignes 8 à 14 : octobre à avril (saison suivante).
+// Chaque case est une formule qui additionne TOUTES les données du bloc (de la 1re saisie jusqu'en bas
+// de l'onglet, nouvelles saisies comprises) : pluie = colonne « Pluie (mm) », arrosage = colonne « mm ».
+var MOIS_BILAN = [
+  { nom: "Mai", num: 5, an: 2026 }, { nom: "Juin", num: 6, an: 2026 }, { nom: "Juillet", num: 7, an: 2026 },
+  { nom: "Août", num: 8, an: 2026 }, { nom: "Septembre", num: 9, an: 2026 },
+  { nom: "octobre", num: 10, an: 2026 }, { nom: "novembre", num: 11, an: 2026 }, { nom: "décembre", num: 12, an: 2026 },
+  { nom: "janvier", num: 1, an: 2027 }, { nom: "février", num: 2, an: 2027 }, { nom: "mars", num: 3, an: 2027 },
+  { nom: "avril", num: 4, an: 2027 }
+];
+var BESOINS_PAR_DEFAUT = [59, 78, 94, 85, 55]; // mai à septembre (Etc = Kc x ETP)
+var NB_LIGNES_RECAP = 15; // 14 lignes de tableau + 1 ligne vide avant le titre de la parcelle
+var COULEURS_LIGNE_RECAP = { 1: "#FCE5CD", 2: "#CFE2F3", 3: "#D9EAD3" };
 
-  PARCELLES.forEach(function (p) {
-    var sheet = ss.getSheetByName(p.sheet);
-    if (!sheet) { results.push(p.sheet + " : onglet introuvable"); return; }
-
-    p.lignes.forEach(function (ligneIndex) {
-      var block = findLigneBlock(sheet, ligneIndex);
-      if (!block) { results.push(p.sheet + " Ligne " + ligneIndex + " : bloc introuvable"); return; }
-
-      var cols = blockColumns(block.blockCol);
-      var plageFin = block.dataStartRow + 300;
-      var nbLignes = plageFin - block.dataStartRow + 1;
-
-      // Colonnes numériques du bloc principal (Date et Heures gardent leur propre format)
-      [cols.duree, cols.debut, cols.fin, cols.debit, cols.m3, cols.mm, cols.pluie].forEach(function (c) {
-        sheet.getRange(block.dataStartRow, c, nbLignes, 1).setNumberFormat("0");
-      });
-
-      // Tableau de bilan mensuel associé, si présent (repéré par le mot "Mois")
-      var colMois = block.blockCol;
-      for (var r = block.headerRow; r < block.headerRow + 90; r++) {
-        var v = sheet.getRange(r, colMois).getValue();
-        if (v && v.toString().trim().toLowerCase() === "mois") {
-          var colPluieBilan = block.blockCol + 1;
-          sheet.getRange(r + 1, colPluieBilan, 6, 4).setNumberFormat("0");
-          break;
-        }
-      }
-
-      results.push(p.sheet + " Ligne " + ligneIndex + " : affichage arrondi appliqué.");
-    });
-  });
-
-  Logger.log(results.join("\n"));
-  return results;
+// Cellule « Surface couverte (ha) » du bloc, en référence absolue (ex. $B$18), ou null.
+function cellSurfaceBloc(sheet, block) {
+  var n = Math.max(1, block.headerRow - 1);
+  var labels = sheet.getRange(1, 1, n, 1).getValues();
+  for (var r = 0; r < n; r++) {
+    if (/surface/i.test((labels[r][0] || "").toString())) {
+      var v = sheet.getRange(r + 1, block.blockCol).getValue();
+      if (typeof v === "number" && v > 0) return "$" + columnToLetter(block.blockCol) + "$" + (r + 1);
+    }
+  }
+  return null;
 }
 
-/* ---------- Remplacement ponctuel : bilan mensuel de La Fontaine Ligne 1 ---------- */
-// À exécuter une seule fois. Repère le tableau construit à la main sous La Fontaine
-// Ligne 1 (recherche du mot "Mois") et le remplace entièrement par la version générée
-// automatiquement (mêmes formules SUMPRODUCT+IFERROR, mêmes couleurs) que les 10 autres
-// blocs. Écrase tout ce qui se trouvait dans cette zone (en-têtes, valeurs, formules).
-function remplacerBilanFontaineLigne1() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var results = [];
-
-  var mois = [
-    { nom: "Mai", num: 5, besoin: 59 },
-    { nom: "Juin", num: 6, besoin: 78 },
-    { nom: "Juillet", num: 7, besoin: 94 },
-    { nom: "Août", num: 8, besoin: 85 },
-    { nom: "Septembre", num: 9, besoin: 55 }
-  ];
-  var COULEURS_LIGNE = { 1: "#FCE5CD", 2: "#CFE2F3", 3: "#D9EAD3" };
-  var COULEUR_HEADER_BG = "#073763";
-  var COULEUR_HEADER_TXT = "#FFFFFF";
-
-  var sheet = ss.getSheetByName("La Fontaine");
-  if (!sheet) { Logger.log("La Fontaine : onglet introuvable"); return; }
-
-  var ligneIndex = 1;
-  var block = findLigneBlock(sheet, ligneIndex);
-  if (!block) { Logger.log("La Fontaine Ligne 1 : bloc introuvable"); return; }
-
+// Dernière ligne contenant une donnée (date, m3 ou pluie) dans un bloc.
+function derniereLigneBloc(sheet, block) {
   var cols = blockColumns(block.blockCol);
-  var colMois = block.blockCol;
-  var colPluieBilan = block.blockCol + 1;
-  var colArrosageBilan = block.blockCol + 2;
-  var colCumul = block.blockCol + 3;
-  var colBesoins = block.blockCol + 4;
-
-  // Repère le tableau existant (recherche "Mois" à partir de la zone estimée)
-  var headerRow2 = -1;
-  var scanFrom = block.headerRow + 30;
-  for (var r = scanFrom; r < scanFrom + 60; r++) {
-    var v = sheet.getRange(r, colMois).getValue();
-    if (v && v.toString().trim().toLowerCase() === "mois") { headerRow2 = r; break; }
+  var n = Math.max(1, Math.min(1000, sheet.getMaxRows() - block.dataStartRow + 1));
+  var v = sheet.getRange(block.dataStartRow, cols.date, n, cols.pluie - cols.date + 1).getValues();
+  var last = block.dataStartRow - 1;
+  for (var i = 0; i < n; i++) {
+    for (var j = 0; j < v[i].length; j++) {
+      if (v[i][j] !== "" && v[i][j] !== null) { last = block.dataStartRow + i; break; }
+    }
   }
-  if (headerRow2 === -1) {
-    Logger.log("La Fontaine Ligne 1 : tableau existant introuvable, rien remplacé.");
-    return;
-  }
-
-  // Efface entièrement l'ancienne zone (valeurs + mise en forme) avant de reconstruire
-  var zone = sheet.getRange(headerRow2, colMois, 7, 5);
-  zone.clearContent();
-  zone.clearFormat();
-
-  var headerRange = sheet.getRange(headerRow2, colMois, 1, 5);
-  headerRange.setValues([["Mois", "Pluie (mm)", "Arrosage (mm)", "cumul pluie+arrosage", "Besoins de plante, sans pluie Etc (mm) = Kc x ETP"]]);
-  headerRange.setBackground(COULEUR_HEADER_BG).setFontColor(COULEUR_HEADER_TXT).setFontWeight("bold");
-
-  var couleurLigne = COULEURS_LIGNE[ligneIndex];
-  var colDateLettre = columnToLetter(cols.date);
-  var colPluieLettre = columnToLetter(cols.pluie);
-  var colMmLettre = columnToLetter(cols.mm);
-  var plageDebut = block.dataStartRow;
-  var plageFin = block.dataStartRow + 300;
-  var dateRange = colDateLettre + plageDebut + ":" + colDateLettre + plageFin;
-  var pluieRange = colPluieLettre + plageDebut + ":" + colPluieLettre + plageFin;
-  var mmRange = colMmLettre + plageDebut + ":" + colMmLettre + plageFin;
-
-  mois.forEach(function (m, idx) {
-    var r = headerRow2 + 1 + idx;
-    var debut = "DATE(2026;" + m.num + ";1)";
-    var finExclusive = "DATE(2026;" + (m.num + 1) + ";1)";
-
-    sheet.getRange(r, colMois).setValue(m.nom);
-
-    var pluieCell = sheet.getRange(r, colPluieBilan);
-    pluieCell.setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + pluieRange + ";0))");
-    pluieCell.setBackground(couleurLigne).setNumberFormat("0");
-
-    var arrosageCell = sheet.getRange(r, colArrosageBilan);
-    arrosageCell.setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + mmRange + ";0))");
-    arrosageCell.setBackground(couleurLigne).setNumberFormat("0");
-
-    var cumulCell = sheet.getRange(r, colCumul);
-    cumulCell.setFormula("=" + columnToLetter(colPluieBilan) + r + "+" + columnToLetter(colArrosageBilan) + r).setNumberFormat("0");
-
-    sheet.getRange(r, colBesoins).setValue(m.besoin).setNumberFormat("0");
-  });
-
-  var totalRow = headerRow2 + 1 + mois.length;
-  var firstDataRow2 = headerRow2 + 1;
-  var lastDataRow2 = headerRow2 + mois.length;
-
-  sheet.getRange(totalRow, colMois).setValue("TOTAL").setFontWeight("bold");
-  sheet.getRange(totalRow, colPluieBilan).setFormula("=SUM(" + columnToLetter(colPluieBilan) + firstDataRow2 + ":" + columnToLetter(colPluieBilan) + lastDataRow2 + ")").setFontWeight("bold").setNumberFormat("0");
-  sheet.getRange(totalRow, colArrosageBilan).setFormula("=SUM(" + columnToLetter(colArrosageBilan) + firstDataRow2 + ":" + columnToLetter(colArrosageBilan) + lastDataRow2 + ")").setFontWeight("bold").setNumberFormat("0");
-  sheet.getRange(totalRow, colCumul).setFormula("=SUM(" + columnToLetter(colCumul) + firstDataRow2 + ":" + columnToLetter(colCumul) + lastDataRow2 + ")").setFontWeight("bold").setNumberFormat("0");
-  sheet.getRange(totalRow, colBesoins).setFormula("=SUM(" + columnToLetter(colBesoins) + firstDataRow2 + ":" + columnToLetter(colBesoins) + lastDataRow2 + ")").setFontWeight("bold").setNumberFormat("0");
-
-  Logger.log("La Fontaine Ligne 1 : ancien tableau (ligne " + headerRow2 + ") remplacé par la version générée.");
+  return last;
 }
 
-/* ---------- Code couleur ponctuel : Cumul / Besoins des tableaux de bilan ---------- */
-// À exécuter une seule fois. Applique une mise en forme conditionnelle DYNAMIQUE (elle se
-// recalcule automatiquement si les données changent) sur les colonnes Cumul et Besoins de
-// chacun des 11 tableaux de bilan :
-//  - Vert  : cumul >= besoins
-//  - Jaune : cumul entre 80% et 100% du besoin (déficit de 0 à 20%)
-//  - Rouge : cumul < 80% du besoin (déficit de plus de 20%)
-function appliquerCodeCouleurBilan() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var results = [];
-  var VERT = "#B7E1CD", JAUNE = "#FCE8B2", ROUGE = "#F4C7C3";
+// Remet la formule de la colonne « mm » : mm = (M3 / surface) / 10, avec la surface lue dans la
+// cellule « Surface couverte (ha) » du bloc (plus de surface écrite en dur dans les formules).
+function reecrireFormulesMm(sheet, block) {
+  var surf = cellSurfaceBloc(sheet, block);
+  if (!surf) return "surface introuvable, formules mm inchangées";
+  var cols = blockColumns(block.blockCol);
+  var last = derniereLigneBloc(sheet, block);
+  if (last < block.dataStartRow) return "aucune donnée";
+  var I = columnToLetter(cols.m3), f = [];
+  for (var r = block.dataStartRow; r <= last; r++) f.push(["=(" + I + r + "/" + surf + ")/10"]);
+  sheet.getRange(block.dataStartRow, cols.mm, f.length, 1).setFormulas(f);
+  return f.length + " formule(s) mm";
+}
 
-  PARCELLES.forEach(function (p) {
-    var sheet = ss.getSheetByName(p.sheet);
-    if (!sheet) { results.push(p.sheet + " : onglet introuvable"); return; }
+// Écrit (ou réécrit) le tableau récapitulatif d'un bloc. besoins = 5 valeurs (mai à septembre).
+function ecrireRecapBloc(sheet, block, ligneIndex, besoins) {
+  var c0 = block.blockCol, ds = block.dataStartRow, cols = blockColumns(c0);
+  var L = columnToLetter;
+  var dateR = L(cols.date) + ds + ":" + L(cols.date);
+  var pluieR = L(cols.pluie) + ds + ":" + L(cols.pluie);
+  var mmR = L(cols.mm) + ds + ":" + L(cols.mm);
+  var tint = COULEURS_LIGNE_RECAP[ligneIndex] || "#F1EEE3";
 
-    p.lignes.forEach(function (ligneIndex) {
-      var block = findLigneBlock(sheet, ligneIndex);
-      if (!block) { results.push(p.sheet + " Ligne " + ligneIndex + " : bloc introuvable"); return; }
+  var head = sheet.getRange(1, c0, 1, 5);
+  head.setValues([["Mois", "Pluie (mm)", "Arrosage (mm)", "cumul pluie+arrosage", "Besoins de plante, sans pluie Etc (mm) = Kc x ETP"]]);
+  head.setBackground("#073763").setFontColor("#FFFFFF").setFontWeight("bold");
 
-      var colMois = block.blockCol;
-      var headerRow2 = -1;
-      for (var r = block.headerRow; r < block.headerRow + 90; r++) {
-        var v = sheet.getRange(r, colMois).getValue();
-        if (v && v.toString().trim().toLowerCase() === "mois") { headerRow2 = r; break; }
-      }
-      if (headerRow2 === -1) { results.push(p.sheet + " Ligne " + ligneIndex + " : tableau de bilan introuvable"); return; }
-
-      var colCumulBilan = block.blockCol + 3;
-      var colBesoinsBilan = block.blockCol + 4;
-      var firstDataRow2 = headerRow2 + 1;
-
-      var rangeCumul = sheet.getRange(firstDataRow2, colCumulBilan, 6, 1);   // colonne Cumul seule
-      var rangeBesoins = sheet.getRange(firstDataRow2, colBesoinsBilan, 6, 1); // colonne Besoins seule
-
-      // Retire TOUTE règle déjà posée touchant cette zone (peu importe sa largeur — ça
-      // couvre aussi bien les nouvelles règles à 1 colonne que les résidus d'une éventuelle
-      // ancienne tentative à 2 colonnes), pour ne jamais laisser une ancienne règle prioritaire
-      // masquer les nouvelles.
-      var rulesExistantes = sheet.getConditionalFormatRules();
-      var rulesConservees = rulesExistantes.filter(function (rule) {
-        return !rule.getRanges().some(function (rg) {
-          return rg.getRow() === firstDataRow2 &&
-                 (rg.getColumn() === colCumulBilan || rg.getColumn() === colBesoinsBilan);
-        });
-      });
-
-      // Références relatives simples (sans $) : la plage appliquée n'ayant qu'une seule
-      // colonne, la ligne s'ajuste automatiquement pour chaque cellule, comme un remplissage
-      // vers le bas classique.
-      var colCumulLettre = columnToLetter(colCumulBilan);
-      var colBesoinsLettre = columnToLetter(colBesoinsBilan);
-      var ref = firstDataRow2;
-
-      var formuleVert = "=" + colCumulLettre + ref + ">=" + colBesoinsLettre + ref;
-      var formuleJaune = "=AND(" + colCumulLettre + ref + "<" + colBesoinsLettre + ref + ";" + colCumulLettre + ref + ">=" + colBesoinsLettre + ref + "*0.8)";
-      var formuleRouge = "=" + colCumulLettre + ref + "<" + colBesoinsLettre + ref + "*0.8";
-
-      [rangeCumul, rangeBesoins].forEach(function (rng) {
-        var ruleVert = SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formuleVert).setBackground(VERT).setRanges([rng]).build();
-        var ruleJaune = SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formuleJaune).setBackground(JAUNE).setRanges([rng]).build();
-        var ruleRouge = SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formuleRouge).setBackground(ROUGE).setRanges([rng]).build();
-        rulesConservees.push(ruleVert, ruleJaune, ruleRouge);
-      });
-
-      sheet.setConditionalFormatRules(rulesConservees);
-
-      results.push(p.sheet + " Ligne " + ligneIndex + " : code couleur appliqué (lignes " + firstDataRow2 + " à " + (firstDataRow2 + 5) + ").");
-    });
+  MOIS_BILAN.forEach(function (m, i) {
+    var row = i < 5 ? 2 + i : 3 + i; // la ligne 7 est le total de la période estivale
+    var deb = "DATE(" + m.an + ";" + m.num + ";1)";
+    var fin = m.num === 12 ? "DATE(" + (m.an + 1) + ";1;1)" : "DATE(" + m.an + ";" + (m.num + 1) + ";1)";
+    var crit = dateR + ";\">=\"&" + deb + ";" + dateR + ";\"<\"&" + fin;
+    sheet.getRange(row, c0).setValue(m.nom).setFontWeight("normal").setBackground(null);
+    sheet.getRange(row, c0 + 1).setFormula("=SUMIFS(" + pluieR + ";" + crit + ")").setBackground(tint);
+    sheet.getRange(row, c0 + 2).setFormula("=SUMIFS(" + mmR + ";" + crit + ")").setBackground(tint);
+    sheet.getRange(row, c0 + 3).setFormula("=" + L(c0 + 1) + row + "+" + L(c0 + 2) + row);
+    if (i < 5) sheet.getRange(row, c0 + 4).setValue(besoins && besoins[i] !== "" && besoins[i] !== null ? besoins[i] : BESOINS_PAR_DEFAUT[i]);
+    sheet.getRange(row, c0 + 1, 1, 4).setNumberFormat("0");
   });
 
+  sheet.getRange(7, c0).setValue("TOTAL periode estivale").setFontWeight("bold");
+  for (var k = 1; k <= 4; k++) {
+    sheet.getRange(7, c0 + k).setFormula("=SUM(" + L(c0 + k) + "2:" + L(c0 + k) + "6)").setFontWeight("bold").setNumberFormat("0");
+  }
+
+  // Code couleur dynamique sur Cumul / Besoins (vert : besoin couvert ; jaune : déficit jusqu'à 20 % ;
+  // rouge : déficit de plus de 20 %). Les mois sans besoin renseigné ne sont pas colorés.
+  var cu = L(c0 + 3), be = L(c0 + 4);
+  var rng = sheet.getRange(2, c0 + 3, 13, 2);
+  var VERT = "#B7E1CD", JAUNE = "#FCE8B2", ROUGE = "#F4C7C3";
+  var regles = sheet.getConditionalFormatRules().filter(function (rule) {
+    return !rule.getRanges().some(function (rg) {
+      return rg.getRow() <= 14 && rg.getColumn() <= c0 + 4 && rg.getLastColumn() >= c0 + 3;
+    });
+  });
+  [["=AND($" + be + "2>0;$" + cu + "2>=$" + be + "2)", VERT],
+   ["=AND($" + be + "2>0;$" + cu + "2<$" + be + "2;$" + cu + "2>=$" + be + "2*0.8)", JAUNE],
+   ["=AND($" + be + "2>0;$" + cu + "2<$" + be + "2*0.8)", ROUGE]].forEach(function (x) {
+    regles.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(x[0]).setBackground(x[1]).setRanges([rng]).build());
+  });
+  sheet.setConditionalFormatRules(regles);
+}
+
+// À EXÉCUTER UNE SEULE FOIS (après avoir fait une copie du fichier : Fichier > Créer une copie).
+// - Onglets dont le tableau est encore sous les données (Bousquet et Riou, La baume, Pilles) : le
+//   tableau est supprimé du milieu des données (les saisies qui le suivaient remontent), puis 15 lignes
+//   sont insérées en haut et les tableaux récapitulatifs y sont reconstruits (mai à avril).
+// - La Fontaine (déjà remontée par tes soins) : les formules sont réécrites sur le même modèle.
+// Dans tous les cas : les formules « mm » sont remises d'aplomb (surface lue dans « Surface couverte »)
+// et les tableaux couvrent toutes les données saisies (de la 1re ligne de données jusqu'en bas).
+function mettreAJourTableauxRecap() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var results = [];
+  PARCELLES.forEach(function (p) {
+    var sheet = findSheetByName(ss, p.sheet);
+    if (!sheet) { results.push(p.sheet + " : onglet introuvable"); return; }
+    var blocks = [];
+    p.lignes.forEach(function (li) { var b = findLigneBlock(sheet, li); if (b) blocks.push({ li: li, b: b }); });
+    if (!blocks.length) { results.push(p.sheet + " : blocs introuvables, rien modifié."); return; }
+
+    var enteteRow = trouverEnteteBilan(sheet, blocks[0].b);
+    var dejaEnHaut = enteteRow !== -1 && enteteRow < blocks[0].b.headerRow;
+    var besoinsParLigne = {};
+
+    if (enteteRow !== -1) {
+      blocks.forEach(function (x) {
+        var vals = sheet.getRange(enteteRow + 1, x.b.blockCol + 4, 5, 1).getValues();
+        besoinsParLigne[x.li] = vals.map(function (v) { return v[0]; });
+      });
+    }
+
+    if (!dejaEnHaut) {
+      if (enteteRow === -1) { results.push(p.sheet + " : tableau récapitulatif introuvable, rien modifié."); return; }
+      // sécurité : le tableau doit faire exactement 7 lignes (en-tête, 5 mois, TOTAL)
+      var finLabel = normTxt(sheet.getRange(enteteRow + 6, blocks[0].b.blockCol).getValue());
+      if (finLabel.indexOf("total") !== 0) { results.push(p.sheet + " : disposition inattendue sous les données, rien modifié."); return; }
+      sheet.deleteRows(enteteRow, 7);
+      sheet.insertRowsBefore(1, NB_LIGNES_RECAP);
+      sheet.getRange(1, 1, NB_LIGNES_RECAP, sheet.getMaxColumns()).clear();
+      // les repères de blocs ont bougé : on les relit
+      blocks = [];
+      p.lignes.forEach(function (li) { var b = findLigneBlock(sheet, li); if (b) blocks.push({ li: li, b: b }); });
+      results.push(p.sheet + " : tableaux déplacés en haut (anciennes lignes " + enteteRow + " à " + (enteteRow + 6) + " retirées des données).");
+    }
+
+    blocks.forEach(function (x) {
+      ecrireRecapBloc(sheet, x.b, x.li, besoinsParLigne[x.li]);
+      var m = reecrireFormulesMm(sheet, x.b);
+      results.push(p.sheet + " Ligne " + x.li + " : tableau mai→avril écrit ; " + m + ".");
+    });
+  });
   Logger.log(results.join("\n"));
   return results;
+}
+
+// Contrôle (n'écrit rien) : où le script trouve les blocs, les tableaux et le début des données.
+function verifierTableauxRecap() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), out = [];
+  PARCELLES.forEach(function (p) {
+    var sheet = findSheetByName(ss, p.sheet);
+    if (!sheet) { out.push(p.sheet + " : onglet introuvable"); return; }
+    p.lignes.forEach(function (li) {
+      var b = findLigneBlock(sheet, li);
+      if (!b) { out.push(p.sheet + " Ligne " + li + " : bloc introuvable"); return; }
+      var h = trouverEnteteBilan(sheet, b);
+      out.push(p.sheet + " Ligne " + li + " : colonne " + columnToLetter(b.blockCol) + ", en-têtes ligne " + b.headerRow +
+        ", données dès la ligne " + b.dataStartRow + ", tableau récapitulatif " +
+        (h === -1 ? "INTROUVABLE" : (h < b.headerRow ? "en haut (ligne " + h + ")" : "sous les données (ligne " + h + ") → lance mettreAJourTableauxRecap")) +
+        ", surface " + (cellSurfaceBloc(sheet, b) || "non trouvée"));
+    });
+  });
+  Logger.log(out.join("\n"));
+  return out;
 }
 
 /* ---------- Fonctions utilitaires partagées ---------- */
@@ -2277,7 +2036,9 @@ function findSheetByName(ss, name) {
 // Repère la colonne de bloc en cherchant le libellé "Ligne N..." dans les 6 premières lignes,
 // puis la ligne d'en-tête "Date" juste en dessous.
 function findLigneBlock(sheet, ligneIndex) {
-  var scanRows = 6;
+  // Le libellé « Ligne N » est cherché dans les 40 premières lignes : depuis que les tableaux
+  // récapitulatifs sont en haut de l'onglet, il se trouve plus bas (ex. ligne 17 à La Fontaine).
+  var scanRows = Math.min(40, sheet.getMaxRows());
   var scanCols = sheet.getLastColumn();
   var values = sheet.getRange(1, 1, scanRows, scanCols).getValues();
   var ligneRegex = new RegExp("^Ligne\\s*" + ligneIndex + "(\\s|\\(|$)", "i");
@@ -2331,13 +2092,21 @@ function blockColumns(blockCol) {
 // (et pas seulement M3) évite de réutiliser une ligne déjà occupée par une saisie Pluie
 // (qui remplit Date + Pluie(mm) mais laisse M3 vide).
 function findNextFreeRow(sheet, dataStartRow, colM3, colDate) {
-  var maxScan = 300;
-  for (var rowI = dataStartRow; rowI < dataStartRow + maxScan; rowI++) {
-    var m3v = sheet.getRange(rowI, colM3).getValue();
-    var dv = sheet.getRange(rowI, colDate).getValue();
-    var m3Blank = (m3v === "" || m3v === null);
-    var dateBlank = (dv === "" || dv === null);
-    if (m3Blank && dateBlank) return rowI;
+  var maxRows = sheet.getMaxRows();
+  var n = Math.min(maxRows - dataStartRow + 1, 1000);
+  if (n >= 1) {
+    var m3 = sheet.getRange(dataStartRow, colM3, n, 1).getValues();
+    var dt = sheet.getRange(dataStartRow, colDate, n, 1).getValues();
+    for (var i = 0; i < n; i++) {
+      var m3Blank = (m3[i][0] === "" || m3[i][0] === null);
+      var dateBlank = (dt[i][0] === "" || dt[i][0] === null);
+      if (m3Blank && dateBlank) return dataStartRow + i;
+    }
+  }
+  // Tableau plein : on ajoute des lignes en bas de l'onglet (sans dépasser ~1000 lignes de données)
+  if (maxRows - dataStartRow + 1 < 1000) {
+    sheet.insertRowsAfter(maxRows, 50);
+    return maxRows + 1;
   }
   return -1;
 }

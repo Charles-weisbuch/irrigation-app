@@ -317,6 +317,39 @@
   main.home .parcel-grid-single .parcel-card .mark{ margin-bottom: 0; }
   main.home .consult-link{ margin-top: 10px; padding: 11px 14px; font-size: 14px; }
 
+
+  /* ---------- Accueil compact : tout tient sur l'écran, sans défilement ---------- */
+  #app:has(main.home){ height: 100vh; height: 100dvh; min-height: 0; }
+  header.home-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  header.home-head h1{ font-size: 19px; }
+  .sheet-btn{
+    background: rgba(245,241,232,0.16); border: 1px solid rgba(245,241,232,0.35); color: var(--cream);
+    border-radius: 999px; padding: 7px 12px; font-size: 12.5px; font-weight: 700; cursor: pointer; white-space: nowrap;
+  }
+  .sheet-btn:active{ background: rgba(245,241,232,0.3); }
+  main.home{ display:flex; flex-direction:column; gap:8px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom)) 14px; min-height: 0; }
+  main.home .pole{ display:flex; flex-direction:column; gap:5px; flex: var(--rows) 0 auto; }
+  main.home .pole-title{ margin: 0; font-size: 12px; }
+  .pole-row{ display:grid; gap:8px; flex:1; grid-auto-rows: minmax(46px, 1fr); }
+  .pole-row.r3{ grid-template-columns: repeat(3, 1fr); }
+  .pole-row.r2{ grid-template-columns: repeat(2, 1fr); }
+  .tile{
+    background: var(--card); border: none; border-radius: 14px; box-shadow: var(--shadow);
+    display:flex; align-items:center; gap:8px; padding: 0 12px; min-width:0; max-height: 96px;
+    font-family: Georgia, "Times New Roman", serif; font-size: 15px; font-weight: 600; color: var(--green-deep);
+    text-align:left; cursor:pointer; transition: transform .12s ease;
+  }
+  .tile:active{ transform: scale(0.96); }
+  .tile .mark{ width:10px; height:10px; border-radius:50%; background: var(--gold); flex-shrink:0; }
+  .tile .name{ line-height:1.15; }
+  .tile.alt{
+    background: transparent; border: 1px solid #E1DACB; box-shadow:none;
+    font-family: inherit; font-size: 13.5px; color: var(--green-deep);
+  }
+  .tile.alt:active{ background: #F1EEE3; }
+  .pole-row.r3 .tile{ padding: 0 9px; gap: 6px; }
+  .pole-row.r3 .tile.alt{ font-size: 12.5px; }
+
   /* ---------- Carte des récoltes ---------- */
   main.map-main{ padding: 0; flex: 1; display: flex; }
   #carteWrap{ position: relative; flex: 1; min-height: calc(100vh - 84px); min-height: calc(100dvh - 84px); }
@@ -749,74 +782,45 @@ function renderChoice(){
   currentLigne = null;
   stopCarte();
   app.innerHTML = `
-    <header class="compact">
+    <header class="compact home-head">
       <h1>SCEA Les Pilles</h1>
+      <button class="sheet-btn" id="openSheet" type="button">📄 Fichier Google</button>
     </header>
     <main class="home">
-      <p class="pole-title">${dropIcon()}<span>Irrigation</span></p>
-      <div class="parcel-grid">
-        <button class="parcel-card" id="choiceArrosage">
-          <span class="mark"></span>
-          <span class="name">Saisie arrosage</span>
-        </button>
-        <button class="parcel-card" id="choicePluie">
-          <span class="mark" style="background:#B5540A;"></span>
-          <span class="name">Saisie pluie</span>
-        </button>
-      </div>
-      <button class="consult-link" id="choiceConsultation">
-        <span class="consult-icon">📊</span>
-        <span>Consulter les tableaux irrigation</span>
-        <span class="consult-chevron">›</span>
-      </button>
+      <section class="pole" style="--rows:1">
+        <p class="pole-title">${dropIcon()}<span>Irrigation</span></p>
+        <div class="pole-row r3">
+          <button class="tile" id="choiceArrosage"><span class="mark"></span><span class="name">Arrosage</span></button>
+          <button class="tile" id="choicePluie"><span class="mark" style="background:#B5540A;"></span><span class="name">Pluie</span></button>
+          <button class="tile alt" id="choiceConsultation"><span>📊</span><span class="name">Consulter</span></button>
+        </div>
+      </section>
 
-      <p class="pole-title pole-title-suite">${clockIcon()}<span>Heures</span></p>
-      <div class="parcel-grid parcel-grid-single">
-        <button class="parcel-card" id="choiceHeures">
-          <span class="mark" style="background:#3E7C8C;"></span>
-          <span class="name">Saisie heures</span>
-        </button>
-      </div>
-      <button class="consult-link" id="choiceConsultationHeures">
-        <span class="consult-icon">⏱️</span>
-        <span>Consulter les tableaux heures</span>
-        <span class="consult-chevron">›</span>
-      </button>
+      <section class="pole" style="--rows:1">
+        <p class="pole-title">${clockIcon()}<span>Heures</span></p>
+        <div class="pole-row r2">
+          <button class="tile" id="choiceHeures"><span class="mark" style="background:#3E7C8C;"></span><span class="name">Saisie heures</span></button>
+          <button class="tile alt" id="choiceConsultationHeures"><span>⏱️</span><span class="name">Consulter</span></button>
+        </div>
+      </section>
 
-      <p class="pole-title pole-title-suite">${truffeIcon()}<span>Récolte</span></p>
-      <div class="parcel-grid">
-        <button class="parcel-card" id="choiceRecolte">
-          <span class="mark" style="background:#6B4423;"></span>
-          <span class="name">Pointage récolte</span>
-        </button>
-        <button class="parcel-card" id="choicePoids">
-          <span class="mark" style="background:#6B4423;"></span>
-          <span class="name">Poids après récolte</span>
-        </button>
-      </div>
-      <button class="consult-link" id="choiceCarte">
-        <span class="consult-icon">🗺️</span>
-        <span>Carte des récoltes</span>
-        <span class="consult-chevron">›</span>
-      </button>
-      <button class="consult-link" id="choiceConsultationPoids">
-        <span class="consult-icon">⚖️</span>
-        <span>Consulter les poids après récolte</span>
-        <span class="consult-chevron">›</span>
-      </button>
+      <section class="pole" style="--rows:2">
+        <p class="pole-title">${truffeIcon()}<span>Récolte</span></p>
+        <div class="pole-row r2">
+          <button class="tile" id="choiceRecolte"><span class="mark" style="background:#6B4423;"></span><span class="name">Pointage</span></button>
+          <button class="tile" id="choicePoids"><span class="mark" style="background:#6B4423;"></span><span class="name">Poids</span></button>
+          <button class="tile alt" id="choiceCarte"><span>🗺️</span><span class="name">Carte</span></button>
+          <button class="tile alt" id="choiceConsultationPoids"><span>⚖️</span><span class="name">Consulter poids</span></button>
+        </div>
+      </section>
 
-      <p class="pole-title pole-title-suite">${euroIcon()}<span>Vente</span></p>
-      <div class="parcel-grid parcel-grid-single">
-        <button class="parcel-card" id="choiceVente">
-          <span class="mark" style="background:#980000;"></span>
-          <span class="name">Saisie vente</span>
-        </button>
-      </div>
-      <button class="consult-link" id="choiceConsultationVente">
-        <span class="consult-icon">💶</span>
-        <span>Consulter les ventes</span>
-        <span class="consult-chevron">›</span>
-      </button>
+      <section class="pole" style="--rows:1">
+        <p class="pole-title">${euroIcon()}<span>Vente</span></p>
+        <div class="pole-row r2">
+          <button class="tile" id="choiceVente"><span class="mark" style="background:#980000;"></span><span class="name">Saisie vente</span></button>
+          <button class="tile alt" id="choiceConsultationVente"><span>💶</span><span class="name">Consulter</span></button>
+        </div>
+      </section>
     </main>
   `;
   document.getElementById("choiceArrosage").addEventListener("click", renderSelect);
@@ -830,6 +834,28 @@ function renderChoice(){
   document.getElementById("choiceConsultationPoids").addEventListener("click", renderConsultationPoids);
   document.getElementById("choiceVente").addEventListener("click", renderVenteSaisie);
   document.getElementById("choiceConsultationVente").addEventListener("click", renderConsultationVente);
+  document.getElementById("openSheet").addEventListener("click", ouvrirFichierGoogle);
+  preparerUrlFichier();
+}
+
+// Lien vers le Google Sheet : l'adresse est demandée au script (elle ne change pas), puis gardée.
+let urlFichierGoogle = null;
+try{ urlFichierGoogle = localStorage.getItem("url_fichier_google"); }catch(e){}
+function preparerUrlFichier(){
+  if(urlFichierGoogle || SCRIPT_URL.indexOf("COLLE_ICI") === 0) return;
+  fetchJSONP("urlFichier").then(d => {
+    if(d && d.url){ urlFichierGoogle = d.url; try{ localStorage.setItem("url_fichier_google", d.url); }catch(e){} }
+  }).catch(() => {});
+}
+async function ouvrirFichierGoogle(){
+  const btn = document.getElementById("openSheet");
+  if(!urlFichierGoogle){
+    if(btn) btn.textContent = "…";
+    try{ const d = await fetchJSONP("urlFichier"); if(d && d.url){ urlFichierGoogle = d.url; try{ localStorage.setItem("url_fichier_google", d.url); }catch(e){} } }catch(e){}
+    if(btn) btn.textContent = "📄 Fichier Google";
+  }
+  if(urlFichierGoogle) window.open(urlFichierGoogle, "_blank", "noopener");
+  else if(btn){ btn.textContent = "✗ Réessaie"; setTimeout(() => { btn.textContent = "📄 Fichier Google"; }, 2500); }
 }
 
 /* ============================================================

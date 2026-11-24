@@ -899,7 +899,7 @@ function arrondi(n){
   return Math.round(Number(n) || 0);
 }
 
-// Même logique de couleur que côté Sheet (appliquerCodeCouleurBilan) :
+// Même logique de couleur que dans le Sheet (mise en forme conditionnelle) :
 // vert = objectif atteint, jaune = déficit ≤ 20%, rouge = déficit > 20%.
 function couleurBilan(cumul, besoins){
   const c = Number(cumul) || 0;
@@ -986,10 +986,15 @@ function renderParcelleContent(container, onglet){
             </tr>
           </thead>
           <tbody>
-            ${b.mois.map(m => {
+            ${b.mois.filter((m, i) => {
+              // mai→sept. et TOTAL toujours visibles ; octobre→avril seulement s'il y a des données
+              if(m.total || i < 5) return true;
+              return (Number(m.pluie)||0) > 0 || (Number(m.arrosage)||0) > 0 || (Number(m.besoins)||0) > 0;
+            }).map(m => {
               const c = couleurBilan(m.cumul, m.besoins);
+              const gras = m.total ? ' style="font-weight:700;"' : '';
               return `
-              <tr>
+              <tr${gras}>
                 <td>${m.mois}</td>
                 <td>${arrondi(m.pluie)}</td>
                 <td>${arrondi(m.arrosage)}</td>
