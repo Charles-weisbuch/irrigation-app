@@ -1,12 +1,24 @@
+# Tableaux récapitulatifs mensuels (à faire une seule fois)
+
+Les tableaux « Mois | Pluie | Arrosage | Cumul | Besoins » (mai → avril + TOTAL période estivale) sont en haut de chaque onglet (La Fontaine, Bousquet et Riou, La baume, Pilles) et se calculent seuls à partir de TOUTES les saisies situées en dessous (formules ouvertes, sans limite de ligne).
+
+1. **Fichier > Créer une copie** (sauvegarde de sécurité).
+2. Colle le nouveau `Code.gs` en entier dans Apps Script, puis **Déployer > Gérer les déploiements > Nouvelle version**.
+3. Lance `verifierTableauxRecap` (affiche ce qui sera fait, ne modifie rien).
+4. Lance `mettreAJourTableauxRecap` **une seule fois** : il remonte le tableau en haut des onglets qui ne l'ont pas encore, ajoute les mois manquants, réécrit les formules et les couleurs (vert / jaune / rouge).
+5. Remplace `index.html` et `sw.js` sur GitHub (Commit / Push), puis Ctrl+Maj+R.
+
+Notes : les besoins d'octobre à avril sont laissés vides (à remplir si tu veux un suivi) ; janvier à avril sont comptés sur 2027 ; les mm d'arrosage utilisent la cellule « Surface couverte (ha) » de chaque ligne.
+
 # Suivi Irrigation — mise en place (15 minutes)
 
 ## Module Récolte
 
 Accueil → **Récolte** :
 
-- **Pointage récolte** → parcelle (La Fontaine, La Baume, Bousquet, Riou, Les Pilles) → **appui de 3 s** sur un poids (<10 g, 20 g, 50 g, 100 g, >100 g) = une truffe dans l'onglet **Récolte pointage** (n°, date, parcelle, poids, position GPS cliquable, commentaire). Le bouton se remplit pendant l'appui ; « ✓ n°X » n'apparaît que si la ligne est bien arrivée dans le Sheet.
+- **Pointage récolte** → parcelle (La Fontaine, La Baume, Bousquet, Riou, Les Pilles) → **appui de 2 s** sur un poids (<10 g, 20 g, 50 g, 100 g, >100 g, Brumale) = une truffe dans l'onglet **Récolte pointage** (n°, date, parcelle, poids, position GPS cliquable, commentaire). Le bouton se remplit pendant l'appui ; « ✓ n°X » n'apparaît que si la ligne est bien arrivée dans le Sheet.
 - **Poids après récolte** → une seule page : date, **parcelle**, type de poids (**Brut non lavé** / **Lavé non trié** / **Net vendable**), poids en **grammes**, commentaire → onglet **Récolte volume**. Une ligne par date (ordre chronologique) ; le poids va dans la colonne de la parcelle et du type choisis ; plusieurs poids identiques le même jour se **cumulent**. Totaux par ligne (V brut, W lavé, X net, Y % de perte = 1 − net / lavé) et totaux / moyenne **en haut (ligne 1) sur toute la colonne** (`=SUM(V4:V)`…), nouvelles saisies comprises. Un total tapé à la main (ex. net du 05/11) n'est jamais écrasé tant qu'aucune parcelle n'a de net ce jour-là. Bousquet n'a pas de colonne « Commentaire » (la colonne F « poids brut » est ignorée) : le commentaire est alors mis en note sur la cellule.
-- **Vente** (nouveau, sur la page d'accueil) → date + pour chaque qualité vendue (Brisure, Morceaux, 2e choix, 1er choix, Extra) prix €/kg et poids g → onglet **Vente**. Une ligne par date ; même qualité le même jour : poids additionnés, prix = moyenne pondérée. Colonnes L (total €), M (prix moyen), N (total g) par date ; tableau rouge du haut (ligne 3) = totaux / moyennes de toute la colonne ; c'est lui qu'affiche « Consulter les ventes ».
+- **Vente** (nouveau, sur la page d'accueil) → date + pour chaque qualité vendue (Brisure, Morceaux, 2e choix, 1er choix, Extra) prix €/kg et poids g → onglet **Vente**. Une ligne par date ; même qualité le même jour : poids additionnés, prix = moyenne pondérée. Colonnes L (total €), M (prix moyen), N (total g) par date ; tableau rouge du haut (ligne 3) = totaux / moyennes de toute la colonne ; c'est lui qu'affiche « Consulter les ventes ». **Client** : liste déroulante (noms dans la colonne « Liste clients » du Sheet, modifiable) + « Autre » pour saisir un nouveau nom, ajouté automatiquement à la liste ; une ligne par date ET par client ; colonnes « Client » et « Liste clients » créées automatiquement à droite de N.
 - **Consulter les poids après récolte** : totaux brut / net vendable et perte, totaux par parcelle, détail par date (avec les commentaires).
 - **Carte des récoltes** : fonds IGN (photos aériennes, plan, cadastre) ou OpenStreetMap ; les truffes pointées apparaissent d'elles-mêmes (rafraîchissement toutes les 15 s).
 
@@ -135,3 +147,19 @@ Le plus simple, vu que tu utilises déjà GitHub : crée un nouveau dépôt, ajo
 - **"Plus de ligne libre"** : le tableau pré-construit (jusqu'à la ligne 34-41 selon l'onglet) est entièrement rempli — il faut l'étendre manuellement dans le Sheet (copier les formules Débit/mm vers le bas) avant de continuer à saisir depuis l'appli.
 - **Échec de l'envoi** : vérifie la connexion internet du téléphone, et que l'URL dans `SCRIPT_URL` est bien complète (se terminant par `/exec`).
 - Si tu modifies `Code.gs` plus tard, il faut redéployer une **nouvelle version** (Déployer > Gérer les déploiements > icône crayon > Version : Nouvelle version), sinon Google continue de servir l'ancienne version.
+
+## Mise à jour : vérification, correction, journal
+
+- **Écran « Vérifie »** avant chaque enregistrement (pluie, arrosage, heures, poids, vente) : résumé + alertes (doublon, date future ou ancienne, valeur aberrante, compteur incohérent, plus de 12 h par jour…). Alerte orange = on peut quand même enregistrer ; alerte rouge = bloquant. Pour la pluie : bouton « Remplacer l'existant ».
+- **✏️ Corriger** (en haut de l'accueil) : les 12 dernières saisies de chaque module, avec Modifier / Supprimer. Le script vérifie que la ligne n'a pas changé entre-temps.
+- **Onglet « Journal »** (créé automatiquement) : chaque modification / suppression y est tracée (avant / après).
+- Les noms (personnes, lieux, tâches, clients) sont normalisés à l'enregistrement. « Brumale » est écrit aussi dans le commentaire ; les lignes dont le commentaire contient « brumale » sont roses.
+
+### Déploiement
+1. Apps Script : remplacer tout `Code.gs`, puis Déployer > Gérer les déploiements > Modifier > Nouvelle version.
+2. Lancer une fois `colorerBrumale` (règle rose étendue au commentaire).
+3. GitHub Desktop : remplacer `index.html` et `sw.js` (cache v9), commit + push, puis Ctrl+Maj+R.
+
+## 📈 Bilan (nouveau)
+Bouton « 📈 Bilan » en haut de l'accueil : stock de truffes (net récolté − vendu), eau par ligne (pluie + arrosage ÷ besoins, mai–septembre), rendement par parcelle (kg/ha), ventes (CA, prix moyen, clients) et heures. Lecture seule, calculé depuis le fichier ; « Actualiser » en bas.
+Déploiement : coller le nouveau `Code.gs` + nouvelle version, remplacer `index.html` et `sw.js` (cache v10).

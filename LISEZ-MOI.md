@@ -163,3 +163,6 @@ Le plus simple, vu que tu utilises déjà GitHub : crée un nouveau dépôt, ajo
 ## 📈 Bilan (nouveau)
 Bouton « 📈 Bilan » en haut de l'accueil : stock de truffes (net récolté − vendu), eau par ligne (pluie + arrosage ÷ besoins, mai–septembre), rendement par parcelle (kg/ha), ventes (CA, prix moyen, clients) et heures. Lecture seule, calculé depuis le fichier ; « Actualiser » en bas.
 Déploiement : coller le nouveau `Code.gs` + nouvelle version, remplacer `index.html` et `sw.js` (cache v10).
+
+## Version ordinateur
+Dès que la fenêtre fait plus de 900 px de large, l'appli passe en mise en page ordinateur : accueil en grille 2×2, Bilan et Corriger sur 2 colonnes, formulaires centrés, fenêtres de dialogue au centre. Sur téléphone rien ne change. Pour l'installer comme une appli : Chrome ou Edge > « Installer » dans la barre d'adresse. (cache v11)
