@@ -165,7 +165,7 @@ function doGet(e) {
   var actionsSaisies = {
     controle: function () { return controlerSaisie(JSON.parse(e.parameter.p || "{}")); },
     saisies: function () { return obtenirSaisies(e.parameter.module); },
-    analyse: function () { return obtenirAnalyse(); },
+    analyse: function () { return obtenirAnalyseCache(); },
     saisieModifier: function () { return modifierSaisie(e.parameter.id, JSON.parse(e.parameter.p || "{}")); },
     saisieSupprimer: function () { return supprimerSaisie(e.parameter.id); }
   };
@@ -3182,6 +3182,15 @@ function analyseHeures() {
   var b = obtenirBilanHeures(), total = 0;
   b.parPersonne.forEach(function (x) { total += x.total; });
   return { total: Math.round(total * 100) / 100, parTache: b.parTache.slice(0, 6), parPersonne: b.parPersonne, parLieu: b.parLieu.slice(0, 6) };
+}
+
+// Résultat gardé 60 s : les nouvelles tentatives (réseau lent) répondent instantanément.
+function obtenirAnalyseCache() {
+  var cache = CacheService.getScriptCache();
+  try { var s = cache.get("analyse_v1"); if (s) return JSON.parse(s); } catch (x) {}
+  var d = obtenirAnalyse();
+  try { cache.put("analyse_v1", JSON.stringify(d), 60); } catch (x) {}
+  return d;
 }
 
 function obtenirAnalyse() {

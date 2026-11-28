@@ -1,4 +1,4 @@
-const CACHE_NAME = "irrigation-v11";
+const CACHE_NAME = "irrigation-v12";
 const ASSETS = ["./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png", "./icon-maskable-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", (event) => {
