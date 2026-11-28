@@ -947,13 +947,13 @@ let bilansCache = null; // évite de recharger à chaque aller-retour dans la m�
 
 // Contourne le blocage CORS en lecture via JSONP (une balise <script> n'est pas
 // soumise aux mêmes restrictions qu'une requête fetch/XHR classique).
-function fetchJSONP(action, params){
+function fetchJSONP(action, params, delai){
   return new Promise((resolve, reject) => {
     const cbName = "jsonpCallback_" + Date.now() + "_" + Math.floor(Math.random()*100000);
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Délai dépassé"));
-    }, 15000);
+    }, delai || 15000);
 
     function cleanup(){
       delete window[cbName];
@@ -988,9 +988,23 @@ function renderBilan(force){
     <header class="compact"><div class="back-row"><button class="back-btn" id="backBtn">‹</button></div><h1>Bilan de saison</h1></header>
     <main class="compact wide"><div id="bilanBody"><p class="loading-msg">Calcul en cours…</p></div></main>`;
   document.getElementById("backBtn").addEventListener("click", renderChoice);
-  if(analyseCache && !force){ dessinerBilan(analyseCache); }
-  fetchJSONP("analyse").then(d => { analyseCache = d; dessinerBilan(d); })
-    .catch(() => { if(!analyseCache) document.getElementById("bilanBody").innerHTML = `<p class="status err">✗ Impossible de charger le bilan (réseau). Réessaie.</p>`; });
+  if(!analyseCache){ try { analyseCache = JSON.parse(localStorage.getItem("analyseDernier") || "null"); } catch(e){} }
+  if(analyseCache){ dessinerBilan(analyseCache); }
+  let essai = 0;
+  const lancer = () => fetchJSONP("analyse", null, 40000).then(d => {
+      analyseCache = d; dessinerBilan(d);
+      try { localStorage.setItem("analyseDernier", JSON.stringify(d)); } catch(e){}
+    }).catch(() => {
+      if(++essai < 3){
+        const b = document.getElementById("bilanBody");
+        if(b && !analyseCache) b.innerHTML = `<p class="loading-msg">Le serveur Google se réveille… nouvel essai (${essai}/2)</p>`;
+        return lancer();
+      }
+      const b = document.getElementById("bilanBody");
+      if(b && !analyseCache) b.innerHTML = `<p class="status err">✗ Impossible de charger le bilan. <button class="btn-main" id="retryBilan">Réessayer</button></p>`;
+      const rb = document.getElementById("retryBilan"); if(rb) rb.addEventListener("click", () => renderBilan(true));
+    });
+  lancer();
 }
 
 function dessinerBilan(d){

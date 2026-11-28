@@ -1046,7 +1046,7 @@ function dessinerBilan(d){
   const maxE = Math.max.apply(null, v.clients.map(c => c.euros).concat([1]));
   html += `<div class="bcard"><h3>💶 Ventes</h3>
     <div class="bkpis"><div class="bkpi"><b>${nf(v.euros, 0)} €</b><span>chiffre d'affaires</span></div><div class="bkpi"><b>${nf(v.prixMoyen, 0)} €/kg</b><span>prix moyen · ${fmtKg(v.g)} vendus</span></div></div>`;
-  v.clients.slice(0, 5).forEach(c => {
+  v.clients.forEach(c => {
     html += `<div class="brow"><div class="l"><span>${escapeHtml(c.client)}</span><span>${nf(c.euros)} €</span></div>${barre(c.euros / maxE * 100)}<div class="s">${fmtKg(c.g)} · ${c.ventes} vente${c.ventes > 1 ? "s" : ""}</div></div>`;
   });
   if(v.qualites.length){
