@@ -683,6 +683,32 @@
     padding: 20px 0;
     font-size: 14px;
   }
+  /* ---------- Vérification avant enregistrement + correction ---------- */
+  .modal-bg{ position:fixed; inset:0; background:rgba(20,30,22,.55); z-index:9999; display:flex; align-items:flex-end; justify-content:center; }
+  .modal{ background:var(--cream); width:100%; max-width:480px; border-radius:20px 20px 0 0; padding:18px 16px calc(16px + env(safe-area-inset-bottom)); max-height:88vh; overflow:auto; box-shadow:0 -6px 30px rgba(0,0,0,.25); }
+  .modal h2{ margin:0 0 10px; font-family:Georgia,serif; font-size:19px; color:var(--green-deep); }
+  .modal .resume{ background:#fff; border-radius:12px; padding:10px 12px; margin-bottom:10px; font-size:15px; line-height:1.5; }
+  .modal .resume b{ color:var(--green-deep); }
+  .alerte{ border-radius:10px; padding:9px 11px; margin-bottom:8px; font-size:14px; line-height:1.35; }
+  .alerte.warn{ background:#FFF3D6; border:1px solid #E8C468; color:#6B4A00; }
+  .alerte.stop{ background:#FBE3E3; border:1px solid #D88; color:#7A1F1F; font-weight:600; }
+  .modal .btns{ display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+  .btn-main{ background:var(--green-deep); color:var(--cream); border:none; border-radius:14px; padding:15px; font-size:16px; font-weight:700; cursor:pointer; }
+  .btn-sec{ background:#fff; color:var(--green-deep); border:1.5px solid #D6CFBE; border-radius:14px; padding:13px; font-size:15px; font-weight:600; cursor:pointer; }
+  .btn-danger{ background:var(--danger); color:#fff; border:none; border-radius:14px; padding:15px; font-size:16px; font-weight:700; cursor:pointer; }
+  .btn-main:disabled,.btn-danger:disabled{ opacity:.5; }
+  .chips{ display:flex; flex-wrap:wrap; gap:7px; margin-bottom:12px; }
+  .chip{ border:1.5px solid #D6CFBE; background:#fff; border-radius:999px; padding:8px 13px; font-size:14px; font-weight:600; color:var(--green-deep); cursor:pointer; }
+  .chip.on{ background:var(--green-deep); border-color:var(--green-deep); color:var(--cream); }
+  .saisie-card{ background:#fff; border-radius:14px; box-shadow:var(--shadow); padding:11px 12px; margin-bottom:9px; }
+  .saisie-card .t{ font-weight:700; color:var(--green-deep); font-size:15px; }
+  .saisie-card .d{ font-size:13px; color:var(--ink-soft); margin:2px 0 8px; }
+  .saisie-card .a{ display:flex; gap:8px; }
+  .saisie-card .a button{ flex:1; padding:9px; border-radius:10px; font-size:14px; font-weight:700; cursor:pointer; border:1.5px solid #D6CFBE; background:#fff; color:var(--green-deep); }
+  .saisie-card .a button.sup{ color:var(--danger); border-color:#E3B3B3; }
+  .field select{ width:100%; border:1.5px solid #E1DACB; background:#fff; border-radius:12px; padding:14px; font-size:17px; color:var(--ink); font-family:inherit; }
+  .corr-msg{ margin:8px 0; font-size:14px; font-weight:600; }
+  .corr-msg.ok{ color:#2E6B3E; } .corr-msg.err{ color:var(--danger); }
 </style>
 </head>
 <body>
@@ -786,7 +812,7 @@ function renderChoice(){
   app.innerHTML = `
     <header class="compact home-head">
       <h1>SCEA Les Pilles</h1>
-      <button class="sheet-btn" id="openSheet" type="button">📄 Fichier Google</button>
+      <span style="display:flex;gap:6px;"><button class="sheet-btn" id="openCorriger" type="button">✏️ Corriger</button><button class="sheet-btn" id="openSheet" type="button">📄 Fichier</button></span>
     </header>
     <main class="home">
       <section class="pole" style="--rows:1">
@@ -837,6 +863,7 @@ function renderChoice(){
   document.getElementById("choiceVente").addEventListener("click", renderVenteSaisie);
   document.getElementById("choiceConsultationVente").addEventListener("click", renderConsultationVente);
   document.getElementById("openSheet").addEventListener("click", ouvrirFichierGoogle);
+  document.getElementById("openCorriger").addEventListener("click", () => renderCorriger());
   preparerUrlFichier();
 }
 
@@ -867,7 +894,7 @@ let bilansCache = null; // évite de recharger à chaque aller-retour dans la m�
 
 // Contourne le blocage CORS en lecture via JSONP (une balise <script> n'est pas
 // soumise aux mêmes restrictions qu'une requête fetch/XHR classique).
-function fetchJSONP(action){
+function fetchJSONP(action, params){
   return new Promise((resolve, reject) => {
     const cbName = "jsonpCallback_" + Date.now() + "_" + Math.floor(Math.random()*100000);
     const timeout = setTimeout(() => {
@@ -884,12 +911,144 @@ function fetchJSONP(action){
     window[cbName] = (data) => { cleanup(); resolve(data); };
 
     const scriptTag = document.createElement("script");
-    scriptTag.src = SCRIPT_URL + "?action=" + action + "&callback=" + cbName;
+    let extra = "";
+    if(params) Object.keys(params).forEach(k => { extra += "&" + encodeURIComponent(k) + "=" + encodeURIComponent(typeof params[k] === "string" ? params[k] : JSON.stringify(params[k])); });
+    scriptTag.src = SCRIPT_URL + "?action=" + action + extra + "&callback=" + cbName;
     scriptTag.onerror = () => { cleanup(); reject(new Error("Échec du chargement")); };
     document.body.appendChild(scriptTag);
   });
 }
 function fetchBilansJSONP(){ return fetchJSONP("bilans"); }
+
+/* ============================================================
+   VÉRIFIE AVANT D'ENREGISTRER + CORRIGER LES SAISIES
+   ============================================================ */
+function oublierCaches(){
+  bilansCache = null; bilanHeuresCache = null; signaturePeseesConnue = null; signatureVentesConnue = null;
+}
+function fmtDateJJMM(iso){ const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ""); return m ? m[3] + "/" + m[2] + "/" + m[1] : (iso || ""); }
+
+// Fenêtre « Vérifie » : résumé + alertes du script. Renvoie null (annulé) ou { remplacer }.
+async function confirmerSaisie(titre, lignesResume, controle){
+  let alertes = [], remplacable = false;
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<div class="modal"><h2>${escapeHtml(titre)}</h2><div class="resume">${lignesResume.map(l => `<div>${l}</div>`).join("")}</div><div id="mAlertes"><p class="loading-msg" style="margin:6px 0;">Vérification…</p></div><div class="btns" id="mBtns"></div></div>`;
+  document.body.appendChild(bg);
+  return new Promise(resolve => {
+    const fin = v => { if(bg.parentNode) bg.parentNode.removeChild(bg); resolve(v); };
+    const dessiner = (bloque, indispo) => {
+      document.getElementById("mAlertes").innerHTML = alertes.map(a => `<div class="alerte ${a.niveau}">${a.niveau === "stop" ? "⛔" : "⚠️"} ${escapeHtml(a.texte)}</div>`).join("")
+        + (indispo ? `<div class="alerte warn">⚠️ Vérification automatique indisponible (réseau). Relis bien le résumé ci-dessus.</div>` : "")
+        + (!alertes.length && !indispo ? `<div class="alerte" style="background:#E6F2E8;border:1px solid #A9CDB0;color:#1F4D2B;">✓ Rien d'anormal détecté.</div>` : "");
+      const b = document.getElementById("mBtns");
+      b.innerHTML = (bloque ? "" : `<button class="btn-main" id="mOk">✓ Enregistrer</button>`)
+        + (!bloque && remplacable ? `<button class="btn-sec" id="mRempl">Remplacer l'existant</button>` : "")
+        + `<button class="btn-sec" id="mNon">← Modifier</button>`;
+      document.getElementById("mNon").onclick = () => fin(null);
+      const ok = document.getElementById("mOk"); if(ok) ok.onclick = () => fin({ remplacer: false });
+      const rp = document.getElementById("mRempl"); if(rp) rp.onclick = () => fin({ remplacer: true });
+    };
+    document.getElementById("mBtns").innerHTML = `<button class="btn-sec" id="mNon0">← Modifier</button>`;
+    document.getElementById("mNon0").onclick = () => fin(null);
+    fetchJSONP("controle", { p: controle }).then(r => {
+      alertes = (r && r.alertes) || []; remplacable = !!(r && r.remplacable);
+      dessiner(alertes.some(a => a.niveau === "stop"), !r);
+    }).catch(() => dessiner(false, true));
+  });
+}
+
+const MODULES_CORRIGER = [
+  ["arrosage", "💧 Arrosage"], ["pluie", "🌧️ Pluie"], ["heures", "⏱️ Heures"],
+  ["pointage", "📍 Pointage"], ["poids", "⚖️ Poids"], ["vente", "💶 Vente"]
+];
+let corrigerModule = "arrosage";
+
+function renderCorriger(module){
+  if(module) corrigerModule = module;
+  currentTab = null; currentLigne = null; stopCarte();
+  app.innerHTML = `
+    <header class="compact"><div class="back-row"><button class="back-btn" id="backBtn">‹</button></div><h1>Corriger une saisie</h1></header>
+    <main class="compact">
+      <div class="chips">${MODULES_CORRIGER.map(m => `<button type="button" class="chip${m[0] === corrigerModule ? " on" : ""}" data-m="${m[0]}">${m[1]}</button>`).join("")}</div>
+      <div id="corrMsg" class="corr-msg"></div>
+      <div id="corrBody"><p class="loading-msg">Chargement…</p></div>
+    </main>`;
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
+  document.querySelectorAll(".chip").forEach(b => b.addEventListener("click", () => renderCorriger(b.dataset.m)));
+  chargerSaisies();
+}
+
+async function chargerSaisies(msg){
+  const body = document.getElementById("corrBody");
+  if(!body) return;
+  const modSel = corrigerModule;
+  let d;
+  try{ d = await fetchJSONP("saisies", { module: modSel }); }
+  catch(e){ body.innerHTML = `<p class="status err">✗ Impossible de charger la liste (réseau). Réessaie.</p>`; return; }
+  if(modSel !== corrigerModule) return;
+  const mEl = document.getElementById("corrMsg");
+  if(msg && mEl){ mEl.textContent = msg.t; mEl.className = "corr-msg " + msg.c; }
+  const items = (d && d.items) || [];
+  if(!items.length){ body.innerHTML = `<p class="loading-msg">Aucune saisie récente.</p>`; return; }
+  body.innerHTML = items.map((it, i) => `<div class="saisie-card"><div class="t">${escapeHtml(it.titre)}</div><div class="d">${escapeHtml(it.detail)}</div><div class="a"><button type="button" data-i="${i}" data-a="mod">✏️ Modifier</button><button type="button" class="sup" data-i="${i}" data-a="sup">🗑️ Supprimer</button></div></div>`).join("");
+  body.querySelectorAll("button[data-a]").forEach(b => b.addEventListener("click", () => {
+    const it = items[+b.dataset.i];
+    if(b.dataset.a === "mod") ouvrirModification(it); else ouvrirSuppression(it);
+  }));
+}
+
+function ouvrirSuppression(it){
+  const bg = document.createElement("div"); bg.className = "modal-bg";
+  bg.innerHTML = `<div class="modal"><h2>Supprimer cette saisie ?</h2><div class="resume"><b>${escapeHtml(it.titre)}</b><br>${escapeHtml(it.detail)}</div><div class="alerte warn">La saisie est retirée du fichier (une trace reste dans l'onglet « Journal »).</div><div class="btns"><button class="btn-danger" id="sOk">🗑️ Oui, supprimer</button><button class="btn-sec" id="sNon">Non, garder</button></div></div>`;
+  document.body.appendChild(bg);
+  const fin = () => bg.parentNode && bg.parentNode.removeChild(bg);
+  document.getElementById("sNon").onclick = fin;
+  document.getElementById("sOk").onclick = async () => {
+    document.getElementById("sOk").disabled = true;
+    let r = null;
+    try{ r = await fetchJSONP("saisieSupprimer", { id: it.id }); }catch(e){}
+    fin();
+    if(r && r.ok){ oublierCaches(); chargerSaisies({ t: "✓ " + r.message, c: "ok" }); }
+    else chargerSaisies({ t: "✗ " + ((r && r.error) || "Pas de réponse : vérifie la connexion, puis regarde la liste avant de réessayer."), c: "err" });
+  };
+}
+
+function ouvrirModification(it){
+  const bg = document.createElement("div"); bg.className = "modal-bg";
+  const champsHtml = it.champs.map((f, i) => {
+    const id = "cf_" + i, v = f.value == null ? "" : f.value;
+    let ctl;
+    if(f.type === "select"){
+      ctl = `<select id="${id}">${(f.options || []).map(o => { const ov = typeof o === "object" ? o.v : o, ol = typeof o === "object" ? o.l : o; return `<option value="${escapeHtml(ov)}"${String(ov) === String(v) ? " selected" : ""}>${escapeHtml(ol)}</option>`; }).join("")}</select>`;
+    } else if(f.type === "combo"){
+      ctl = `<input id="${id}" list="${id}_l" value="${escapeHtml(v)}" autocomplete="off"><datalist id="${id}_l">${(f.options || []).map(o => `<option value="${escapeHtml(o)}">`).join("")}</datalist>`;
+    } else if(f.type === "number"){
+      ctl = `<input id="${id}" type="number" inputmode="decimal" step="${f.step || "any"}" value="${escapeHtml(v)}">`;
+    } else {
+      ctl = `<input id="${id}" type="${f.type === "date" ? "date" : f.type === "time" ? "time" : "text"}" value="${escapeHtml(v)}">`;
+    }
+    return `<div class="field"><label for="${id}">${escapeHtml(f.label)}</label>${ctl}</div>`;
+  }).join("");
+  bg.innerHTML = `<div class="modal"><h2>Modifier</h2><div class="resume"><b>${escapeHtml(it.titre)}</b><br>${escapeHtml(it.detail)}</div>${champsHtml}<div id="mErr"></div><div class="btns"><button class="btn-main" id="mOk">✓ Enregistrer la correction</button><button class="btn-sec" id="mNon">Annuler</button></div></div>`;
+  document.body.appendChild(bg);
+  const fin = () => bg.parentNode && bg.parentNode.removeChild(bg);
+  document.getElementById("mNon").onclick = fin;
+  document.getElementById("mOk").onclick = async () => {
+    const vals = {};
+    it.champs.forEach((f, i) => { vals[f.k] = document.getElementById("cf_" + i).value; });
+    const btn = document.getElementById("mOk"); btn.disabled = true;
+    const errEl = document.getElementById("mErr"); errEl.innerHTML = "";
+    let r = null;
+    try{ r = await fetchJSONP("saisieModifier", { id: it.id, p: vals }); }catch(e){}
+    if(r && r.ok){ fin(); oublierCaches(); chargerSaisies({ t: "✓ " + r.message, c: "ok" }); }
+    else{
+      errEl.innerHTML = `<div class="alerte stop">⛔ ${escapeHtml((r && r.error) || "Pas de réponse : vérifie la connexion, puis regarde la liste avant de réessayer.")}</div>`;
+      btn.disabled = false;
+    }
+  };
+}
+
 
 let currentConsultTab = null; // onglet parcelle actuellement affiché dans la consultation
 
@@ -1155,6 +1314,13 @@ async function onPluieSubmit(ev){
     date: document.getElementById("p_date").value,
     mm: document.getElementById("p_mm").value
   };
+
+  const okP = await confirmerSaisie("Vérifie la pluie", [
+    "📅 <b>" + fmtDateJJMM(payload.date) + "</b>", "🌧️ <b>" + String(payload.mm).replace(".", ",") + " mm</b> sur toutes les parcelles"
+  ], { mode: "pluie", date: payload.date, mm: payload.mm });
+  if(!okP) return;
+  if(okP.remplacer) payload.remplacer = true;
+  oublierCaches();
 
   saveBtn.disabled = true;
   statusEl.textContent = "Enregistrement…";
@@ -1448,6 +1614,12 @@ async function onHeuresSubmit(ev){
     duree: dureeDecimale
   };
 
+  const okH = await confirmerSaisie("Vérifie les heures", [
+    "👤 <b>" + escapeHtml(payload.nom) + "</b>", "📅 " + fmtDateJJMM(payload.date),
+    "📍 " + escapeHtml(payload.lieu) + " · " + escapeHtml(payload.tache), "⏱️ <b>" + String(dureeDecimale).replace(".", ",") + " h</b>"
+  ], { mode: "heures", nom: payload.nom, date: payload.date, lieu: payload.lieu, tache: payload.tache, duree: dureeDecimale });
+  if(!okH) return;
+
   saveBtn.disabled = true;
   statusEl.textContent = "Enregistrement…";
   statusEl.className = "status pending";
@@ -1626,7 +1798,7 @@ function rendreListeRecoltes(d){
   box.innerHTML = `
     <div class="total-list">
       ${d.rows.map(r => `
-        <div class="total-row recent-row"${r.poids === "Brumale" ? ' style="background:#FF00A8;color:#fff;font-weight:700;border-radius:8px;padding-left:8px;padding-right:8px;"' : ''}>
+        <div class="total-row recent-row"${(r.poids === "Brumale" || /brumale/i.test(r.commentaire || "")) ? ' style="background:#FF00A8;color:#fff;font-weight:700;border-radius:8px;padding-left:8px;padding-right:8px;"' : ''}>
           <span class="t-label">n°${escapeHtml(r.no)} · ${escapeHtml(r.date)} · ${escapeHtml(r.parcelle)}</span>
           <span class="t-value">${escapeHtml(r.poids)}</span>
         </div>
@@ -1953,6 +2125,10 @@ function renderPoidsSaisie(){
     }
     const type = typePoidsChoisi, parcelle = parcellePoidsChoisie;
     const dateIso = document.getElementById("v_date").value;
+    const okW = await confirmerSaisie("Vérifie le poids", [
+      "📅 " + fmtDateJJMM(dateIso), "📍 <b>" + escapeHtml(parcelle) + "</b>", "⚖️ " + escapeHtml(String(type)) + " : <b>" + poids + " g</b>"
+    ], { mode: "recolteVolume", date: dateIso, parcelle: parcelle, type: type, poids: poids });
+    if(!okW) return;
     saveBtn.disabled = true;
     statusEl.textContent = "Enregistrement…"; statusEl.className = "status pending";
 
@@ -2199,6 +2375,12 @@ function renderVenteSaisie(){
       client = inClient.value.trim();
       if(!client){ statusEl.textContent = "⚠️ Saisis le nom du nouveau client."; statusEl.className = "status err"; return; }
     }
+    const okV = await confirmerSaisie("Vérifie la vente", [
+      "📅 " + fmtDateJJMM(dateIso), "👤 <b>" + escapeHtml(client || "(sans client)") + "</b>"
+    ].concat(lignes.map(l => "• " + escapeHtml(l.qualite) + " : " + l.poids + " g à " + l.prix + " €/kg"))
+     .concat(["💶 <b>" + (Math.round(lignes.reduce((s, l) => s + l.prix * l.poids / 1000, 0) * 100) / 100) + " €</b>"]),
+     { mode: "vente", date: dateIso, client: client, lignes: lignes });
+    if(!okV) return;
     saveBtn.disabled = true;
     statusEl.textContent = "Enregistrement…"; statusEl.className = "status pending";
 
@@ -2399,11 +2581,12 @@ async function renderCarteRecoltes(retour){
       couchePoints.clearLayers();
       const lls = [], brumales = [];
       pts.forEach(p => {
+        const typeEff = (p.poids === "Brumale" || /brumale/i.test(p.commentaire || "")) ? "Brumale" : p.poids;
         const m = L.circleMarker([p.lat, p.lon], {
-          radius: RAYONS_POIDS[p.poids] || 7, color: "#ffffff", weight: 2,
-          fillColor: COULEURS_POIDS[p.poids] || "#6B4423", fillOpacity: 0.95
+          radius: RAYONS_POIDS[typeEff] || 7, color: "#ffffff", weight: 2,
+          fillColor: COULEURS_POIDS[typeEff] || "#6B4423", fillOpacity: 0.95
         });
-        if(p.poids === "Brumale"){ m.setStyle({ color: "#111111", weight: 3 }); brumales.push(m); }
+        if(p.poids === "Brumale" || /brumale/i.test(p.commentaire || "")){ m.setStyle({ color: "#111111", weight: 3 }); brumales.push(m); }
         m.bindPopup("<b>n°" + escapeHtml(p.no) + "</b> · " + escapeHtml(p.date) + "<br>" + escapeHtml(p.parcelle) +
           "<br><b>" + escapeHtml(p.poids) + "</b>" + (p.commentaire ? "<br>" + escapeHtml(p.commentaire) : ""));
         m.addTo(couchePoints);
@@ -2609,6 +2792,14 @@ async function onSubmit(ev){
     compteur_fin: document.getElementById("f_fin").value,
     m3: document.getElementById("f_vol").value
   };
+
+  const okA = await confirmerSaisie("Vérifie l'arrosage", [
+    "💧 <b>" + escapeHtml(currentTab.label) + " · " + escapeHtml(currentLigne.label || ("Ligne " + currentLigne.ligne)) + "</b>", "📅 " + fmtDateJJMM(payload.date),
+    "🔢 Compteur " + escapeHtml(payload.compteur_debut || "?") + " → " + escapeHtml(payload.compteur_fin || "?"),
+    "🚿 <b>" + escapeHtml(payload.m3 || "?") + " m³</b>" + (payload.duree ? " · " + escapeHtml(payload.duree) + " h" : "")
+  ], { mode: "arrosage", onglet: payload.onglet, ligne: payload.ligne, date: payload.date, duree: payload.duree, compteur_debut: payload.compteur_debut, compteur_fin: payload.compteur_fin, m3: payload.m3 });
+  if(!okA) return;
+  oublierCaches();
 
   saveBtn.disabled = true;
   statusEl.textContent = "Enregistrement…";

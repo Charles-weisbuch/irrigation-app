@@ -161,6 +161,24 @@ function doGet(e) {
     return ContentService.createTextOutput(json4).setMimeType(ContentService.MimeType.JSON);
   }
 
+  // Contrôle avant enregistrement, liste / correction / suppression des saisies (réponse lue par l'appli).
+  var actionsSaisies = {
+    controle: function () { return controlerSaisie(JSON.parse(e.parameter.p || "{}")); },
+    saisies: function () { return obtenirSaisies(e.parameter.module); },
+    saisieModifier: function () { return modifierSaisie(e.parameter.id, JSON.parse(e.parameter.p || "{}")); },
+    saisieSupprimer: function () { return supprimerSaisie(e.parameter.id); }
+  };
+  if (actionsSaisies[action]) {
+    var retS;
+    try { retS = actionsSaisies[action](); } catch (errS) { retS = { ok: false, error: errS.message, alertes: [], items: [] }; }
+    var jsonS = JSON.stringify(retS);
+    if (e.parameter.callback) {
+      return ContentService.createTextOutput(e.parameter.callback + "(" + jsonS + ")")
+        .setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    return ContentService.createTextOutput(jsonS).setMimeType(ContentService.MimeType.JSON);
+  }
+
   var actionsRecolte = {
     dernieresRecoltes: obtenirDernieresRecoltes,
     pointsRecolte: obtenirPointsRecolte,
@@ -275,26 +293,9 @@ function handleArrosage(data) {
   }
 
   var cols = blockColumns(block.blockCol);
-  var dateValue = data.date ? parseDateOnly(data.date) : "";
-  var targetRow = resolveTargetRow(sheet, block, cols, dateValue);
+  var targetRow = ecrireArrosage(sheet, block, cols, data);
   if (targetRow === -1) {
     return jsonOutput({ ok: false, error: "Plus de ligne libre dans le tableau — il faut l'étendre manuellement." });
-  }
-
-  setValueColored(sheet.getRange(targetRow, cols.date), dateValue, COULEUR_ARROSAGE).setNumberFormat(FORMAT_DATE);
-  setValueColored(sheet.getRange(targetRow, cols.duree), Number(data.duree), COULEUR_ARROSAGE);
-  setValueColored(sheet.getRange(targetRow, cols.debut), Number(data.compteur_debut), COULEUR_ARROSAGE);
-  setValueColored(sheet.getRange(targetRow, cols.fin), Number(data.compteur_fin), COULEUR_ARROSAGE);
-  setValueColored(sheet.getRange(targetRow, cols.m3), Number(data.m3), COULEUR_ARROSAGE);
-
-  // Heure début / Heure fin sont facultatives : rien n'est écrit si elles sont vides.
-  if (data.heure_debut) {
-    var hd = sheet.getRange(targetRow, cols.heureDebut);
-    hd.setValue(parseHeure(data.heure_debut)).setNumberFormat("HH:mm").setFontColor(COULEUR_ARROSAGE);
-  }
-  if (data.heure_fin) {
-    var hf = sheet.getRange(targetRow, cols.heureFin);
-    hf.setValue(parseHeure(data.heure_fin)).setNumberFormat("HH:mm").setFontColor(COULEUR_ARROSAGE);
   }
 
   return jsonOutput({ ok: true, row: targetRow });
@@ -307,29 +308,15 @@ function handlePluie(data) {
   if (!data.date || isNaN(mm)) {
     return jsonOutput({ ok: false, error: "Date ou mm manquant pour la pluie." });
   }
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var dateValue = parseDateOnly(data.date);
-  var details = [];
-
-  PARCELLES.forEach(function (p) {
-    var sheet = ss.getSheetByName(p.sheet);
-    if (!sheet) { details.push(p.sheet + " : onglet introuvable"); return; }
-
-    p.lignes.forEach(function (ligneIndex) {
-      var block = findLigneBlock(sheet, ligneIndex);
-      if (!block) { details.push(p.sheet + " Ligne " + ligneIndex + " : bloc introuvable"); return; }
-
-      var cols = blockColumns(block.blockCol);
-      var targetRow = resolveTargetRow(sheet, block, cols, dateValue);
-      if (targetRow === -1) { details.push(p.sheet + " Ligne " + ligneIndex + " : plus de ligne libre"); return; }
-
-      setValueColored(sheet.getRange(targetRow, cols.date), dateValue, COULEUR_PLUIE).setNumberFormat(FORMAT_DATE);
-      setValueColored(sheet.getRange(targetRow, cols.pluie), mm, COULEUR_PLUIE);
-      details.push(p.sheet + " Ligne " + ligneIndex + " : ligne " + targetRow + " OK");
-    });
+  return avecVerrou(function () {
+    // « Remplacer » (choisi dans l'écran de vérification) : la pluie déjà saisie ce jour-là est retirée d'abord.
+    if (data.remplacer) {
+      var n = retirerToutePluieDate(data.date);
+      if (n) journaliser("Remplacement", "Pluie", { date: data.date, lignes: n }, { date: data.date, mm: mm }, "");
+    }
+    var details = ecrirePluie(parseDateOnly(data.date), mm);
+    return jsonOutput({ ok: true, details: details });
   });
-
-  return jsonOutput({ ok: true, details: details });
 }
 
 /* ================================================================
@@ -343,9 +330,11 @@ function handleHeures(data) {
   if (!data.date || !data.nom || !data.lieu || !data.tache || data.duree === undefined || data.duree === "") {
     return jsonOutput({ ok: false, error: "Champs manquants pour la saisie heures." });
   }
-  if (HEURES_PERSONNES.indexOf(data.nom) === -1) {
+  var nomCanon = personneCanonique(data.nom);
+  if (!nomCanon) {
     return jsonOutput({ ok: false, error: "Personne inconnue : " + data.nom });
   }
+  data.nom = nomCanon;
 
   var dateValue = parseDateOnly(data.date);
   var duree = Number(data.duree);
@@ -353,25 +342,14 @@ function handleHeures(data) {
     return jsonOutput({ ok: false, error: "Durée invalide." });
   }
 
-  // Si "lieu" ou "tache" est une valeur inédite (saisie via "Autre"), on l'ajoute à la liste
-  // de référence correspondante (et donc aux lignes du tableau récapitulatif concerné).
-  // "nom" est toujours l'un des 6 emplacements fixes (Paul/René/Charles/Externe 1/2/3) —
-  // pas de liste à étendre pour ce champ.
-  ajouterSiNouveau(sheet, HEURES_LIEU_LIST_COL, HEURES_LIEU_LIST_START, data.lieu, HEURES_LIEU_RECAP_WIDTH);
-  ajouterSiNouveau(sheet, HEURES_TACHE_LIST_COL, HEURES_TACHE_LIST_START, data.tache, HEURES_TACHE_RECAP_WIDTH);
-
-  var targetRow = resolveTargetRowHeures(sheet, dateValue);
+  // Lieu et tâche : l'orthographe de la liste existante est reprise (majuscules, espaces) pour ne
+  // pas créer de doublons du type « Baume » / « baume » / « Baume ».
+  var listesH = obtenirListesHeures();
+  var lieuC = canonDans(listesH.lieux, data.lieu), tacheC = canonDans(listesH.taches, data.tache);
+  var targetRow = ecrireHeures(sheet, dateValue, data.nom, lieuC, tacheC, duree);
   if (targetRow === -1) {
     return jsonOutput({ ok: false, error: "Plus de ligne libre dans le tableau des heures — il faut l'étendre manuellement." });
   }
-
-  var dateCell = sheet.getRange(targetRow, HEURES_COL_DATE);
-  dateCell.setValue(dateValue).setNumberFormat(FORMAT_DATE);
-  sheet.getRange(targetRow, HEURES_COL_PERSONNE).setValue(data.nom);
-  sheet.getRange(targetRow, HEURES_COL_LIEU).setValue(data.lieu);
-  sheet.getRange(targetRow, HEURES_COL_TACHE).setValue(data.tache);
-  sheet.getRange(targetRow, HEURES_COL_TEMPS).setValue(duree);
-  sheet.getRange(targetRow, HEURES_COL_HORODATAGE).setValue(new Date()).setNumberFormat("dd/mm/yyyy hh:mm:ss");
 
   return jsonOutput({ ok: true, row: targetRow });
 }
@@ -557,7 +535,7 @@ var RECOLTE_COL_LAT = 9;      // I
 var RECOLTE_COL_LON = 10;     // J
 var RECOLTE_NB_COLS = 10;     // A à J (pour le décalage chronologique)
 var RECOLTE_PARCELLES = ["La Fontaine", "La Baume", "Bousquet", "Riou", "Les Pilles"];
-var RECOLTE_POIDS = ["<10 g", "20 g", "50 g", "100 g", ">100 g"];
+var RECOLTE_POIDS = ["<10 g", "20 g", "50 g", "100 g", ">100 g", "Brumale"];
 var VOLUME_SHEET = "Récolte volume";
 
 function normTxt(t) {
@@ -630,7 +608,7 @@ function handleRecolte(data) {
   sheet.getRange(r, RECOLTE_COL_DATE).setValue(dateValue).setNumberFormat(FORMAT_DATE);
   sheet.getRange(r, RECOLTE_COL_PARCELLE).setValue(data.parcelle);
   sheet.getRange(r, RECOLTE_COL_POIDS).setNumberFormat("@").setValue(data.poids); // texte (« <10 g »)
-  sheet.getRange(r, RECOLTE_COL_COMMENT).setValue((data.commentaire || "").toString().trim());
+  sheet.getRange(r, RECOLTE_COL_COMMENT).setValue(commentaireAvecBrumale(data.poids, data.commentaire));
 
   var lat = Number(data.lat), lon = Number(data.lon);
   var cellLoc = sheet.getRange(r, RECOLTE_COL_LOC);
@@ -655,7 +633,42 @@ function handleRecolte(data) {
     sheet.getRange(2, RECOLTE_COL_LON).setValue("Longitude");
   }
 
+  try { assurerCouleurBrumale(sheet); } catch (e) {}
+
   return jsonOutput({ ok: true, row: r, no: maxNo + 1 });
+}
+
+// Les lignes « Brumale » du tableau « Récolte pointage » ressortent en rose vif (mise en forme
+// conditionnelle sur la colonne Poids : suit les lignes quand elles sont décalées). Idempotent.
+function assurerCouleurBrumale(sheet) {
+  // Rose vif si le type est « Brumale » OU si « brumale » figure dans le commentaire (anciennes saisies).
+  var formule = '=OR($' + String.fromCharCode(64 + RECOLTE_COL_POIDS) + RECOLTE_DATA_START_ROW + '="Brumale",ISNUMBER(SEARCH("brumale",$' +
+    String.fromCharCode(64 + RECOLTE_COL_COMMENT) + RECOLTE_DATA_START_ROW + ')))';
+  var rules = sheet.getConditionalFormatRules(), gardees = [];
+  for (var i = 0; i < rules.length; i++) {
+    var bc = rules[i].getBooleanCondition && rules[i].getBooleanCondition();
+    var v = bc && bc.getCriteriaValues ? bc.getCriteriaValues() : [];
+    var txt = v.length ? String(v[0]) : "";
+    if (/brumale/i.test(txt)) {
+      if (/SEARCH|CHERCHE/i.test(txt)) return; // déjà à jour
+      continue; // ancienne règle (type seul) : remplacée
+    }
+    gardees.push(rules[i]);
+  }
+  var plage = sheet.getRange(RECOLTE_DATA_START_ROW, 1, Math.max(1, sheet.getMaxRows() - RECOLTE_DATA_START_ROW + 1), RECOLTE_NB_COLS);
+  var regle = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(formule).setBackground("#FF00A8").setFontColor("#FFFFFF").setBold(true)
+    .setRanges([plage]).build();
+  gardees.push(regle);
+  sheet.setConditionalFormatRules(gardees);
+}
+
+// À lancer une fois pour colorer les Brumale déjà saisies.
+function colorerBrumale() {
+  var sheet = ongletPointage(SpreadsheetApp.getActiveSpreadsheet());
+  if (!sheet) return "Onglet 'Récolte pointage' introuvable.";
+  assurerCouleurBrumale(sheet);
+  return "OK : les lignes Brumale sont en rose vif.";
 }
 
 // Pour l'écran de contrôle : nombre total de truffes + les 5 dernières lignes du tableau
@@ -1342,12 +1355,13 @@ function assurerTotauxVente(info) {
   }
   QUALITES_VENTE.forEach(function (q) {
     var P = columnToLetter(info.cols[q.key].prix), W = columnToLetter(info.cols[q.key].poids);
-    poser(info.cols[q.key].prix, "=IFERROR(AVERAGE(" + P + start + ":" + P + ");\"\")");
+    // moyenne PONDÉRÉE par les poids (et non moyenne simple des prix de chaque ligne)
+    poser(info.cols[q.key].prix, "=IFERROR(SUMPRODUCT(" + P + start + ":" + P + ";" + W + start + ":" + W + ")/SUM(" + W + start + ":" + W + ");\"\")");
     poser(info.cols[q.key].poids, "=SUM(" + W + start + ":" + W + ")");
   });
   var LE = columnToLetter(info.colEuros), LM = columnToLetter(info.colMoy), LG = columnToLetter(info.colG);
   poser(info.colEuros, "=SUM(" + LE + start + ":" + LE + ")");
-  poser(info.colMoy, "=IFERROR(AVERAGE(" + LM + start + ":" + LM + ");\"\")");
+  poser(info.colMoy, "=IFERROR(" + LE + tr + "/(" + LG + tr + "/1000);\"\")");
   poser(info.colG, "=SUM(" + LG + start + ":" + LG + ")");
 }
 
@@ -1357,7 +1371,7 @@ function handleVente(data) {
   if (info.error) return jsonOutput({ ok: false, error: info.error });
   info = assurerColonnesClient(info);
   if (info.error) return jsonOutput({ ok: false, error: info.error });
-  var client = (data.client || "").toString().trim();
+  var client = canonDans(info.listCol ? lireListeClients(info) : [], data.client);
   if (!data.date) return jsonOutput({ ok: false, error: "Date manquante." });
   var lignes = data.lignes || [];
   if (!lignes.length) return jsonOutput({ ok: false, error: "Aucune qualité renseignée." });
@@ -2203,4 +2217,846 @@ function columnToLetter(col) {
 
 function jsonOutput(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/* ================================================================
+   SAISIES — contrôle avant enregistrement, correction, suppression, journal
+   ----------------------------------------------------------------
+   Appelé par l'appli (écran « Vérifie » et écran « Corriger ») :
+     doGet action=controle        → alertes éventuelles avant d'enregistrer
+     doGet action=saisies         → dernières saisies d'un module, avec leurs champs modifiables
+     doGet action=saisieModifier  → modifie une saisie (la ligne est vérifiée avant)
+     doGet action=saisieSupprimer → supprime une saisie
+   Chaque modification / suppression est écrite dans l'onglet « Journal » (avant / après).
+   ================================================================ */
+
+var JOURNAL_SHEET = "Journal";
+var NB_SAISIES_LISTE = 12;
+var MODULES_SAISIES = ["arrosage", "pluie", "heures", "pointage", "poids", "vente"];
+
+/* ---------- Outils communs ---------- */
+
+function fuseauClasseur() { return SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(); }
+function isoDate(d) { return Utilities.formatDate(d, fuseauClasseur(), "yyyy-MM-dd"); }
+function heureTexte(v) {
+  if (!(v instanceof Date)) return "";
+  return ("0" + v.getHours()).slice(-2) + ":" + ("0" + v.getMinutes()).slice(-2);
+}
+function datePourChamp(v) { return v instanceof Date ? isoDate(v) : ""; }
+function estVide(v) { return v === "" || v === null || v === undefined; }
+function nombreChamp(v) {
+  if (estVide(v)) return "";
+  var n = Number(String(v).replace(",", "."));
+  return isFinite(n) ? n : NaN;
+}
+function dateIsoValide(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s || "")); }
+function jourSemaineFR(d) {
+  return ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"][d.getDay()] + " " + formatDateFR(d);
+}
+
+// Empreinte d'une ligne : sert à vérifier qu'elle n'a pas changé entre l'affichage et la modification.
+function empreinte(valeurs) {
+  var s = valeurs.map(function (v) {
+    if (v instanceof Date) return String(v.getTime());
+    return estVide(v) ? "" : String(v);
+  }).join("~");
+  var h = 5381;
+  for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+function avecVerrou(fn) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(25000);
+  try { return fn(); } finally { lock.releaseLock(); }
+}
+
+function journaliser(action, module, avant, apres, detail) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sh = ss.getSheetByName(JOURNAL_SHEET);
+    if (!sh) {
+      sh = ss.insertSheet(JOURNAL_SHEET);
+      sh.getRange(1, 1, 1, 6).setValues([["Date et heure", "Action", "Module", "Avant", "Après", "Détail"]]).setFontWeight("bold");
+      try { sh.setFrozenRows(1); } catch (e0) {}
+    }
+    var r = sh.getLastRow() + 1;
+    sh.getRange(r, 1, 1, 6).setValues([[new Date(), action, module,
+      avant ? JSON.stringify(avant) : "", apres ? JSON.stringify(apres) : "", detail || ""]]);
+    sh.getRange(r, 1).setNumberFormat("dd/mm/yyyy hh:mm:ss");
+  } catch (e) { /* le journal ne doit jamais bloquer une correction */ }
+}
+
+// Supprime la ligne `row` d'un bloc de colonnes en remontant d'un cran tout ce qui est dessous
+// (jusqu'à `last`), colonnes [col, col+width[ seulement : les tableaux voisins ne bougent pas.
+function decalerHaut(sheet, col, width, row, last) {
+  if (row < last) {
+    sheet.getRange(row + 1, col, last - row, width).copyTo(sheet.getRange(row, col, last - row, width));
+  }
+  sheet.getRange(last, col, 1, width).clearContent();
+}
+
+function reponse(ok, message, extra) {
+  var o = { ok: ok };
+  if (ok) o.message = message || ""; else o.error = message || "Erreur";
+  if (extra) Object.keys(extra).forEach(function (k) { o[k] = extra[k]; });
+  return o;
+}
+var MSG_LIGNE_CHANGEE = "Cette ligne a changé depuis l'affichage de la liste. Rouvre « Corriger » pour la rafraîchir.";
+
+function canonDans(liste, valeur) {
+  var v = (valeur || "").toString().replace(/\s+/g, " ").trim();
+  var k = normTxt(v);
+  for (var i = 0; i < liste.length; i++) if (normTxt(liste[i]) === k) return liste[i].toString().trim();
+  return v;
+}
+
+/* ---------- Blocs d'irrigation (11 blocs : pluie sur tous, arrosage sur un) ---------- */
+
+function blocsIrrigation() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), out = [];
+  PARCELLES.forEach(function (p) {
+    var sh = ss.getSheetByName(p.sheet);
+    if (!sh) return;
+    p.lignes.forEach(function (li) {
+      var b = findLigneBlock(sh, li);
+      if (!b) return;
+      out.push({ sheet: sh, onglet: p.sheet, ligne: li, block: b, cols: blockColumns(b.blockCol) });
+    });
+  });
+  return out;
+}
+
+// Lignes d'un bloc : jusqu'à la dernière date renseignée. [{row, v:[10 colonnes]}]
+function lignesBloc(B) {
+  var sheet = B.sheet, start = B.block.dataStartRow, c = B.cols;
+  var max = Math.min(sheet.getMaxRows() - start + 1, 1000);
+  if (max < 1) return [];
+  var w = c.pluie - c.date + 1;
+  var vals = sheet.getRange(start, c.date, max, w).getValues();
+  var last = -1, i, out = [];
+  for (i = 0; i < vals.length; i++) if (!estVide(vals[i][0])) last = i;
+  for (i = 0; i <= last; i++) out.push({ row: start + i, v: vals[i] });
+  return out;
+}
+
+function trouverBloc(onglet, ligne) {
+  var blocs = blocsIrrigation(), res = null;
+  blocs.forEach(function (B) { if (normTxt(B.onglet) === normTxt(onglet) && B.ligne === Number(ligne)) res = B; });
+  return res;
+}
+
+function libelleLigne(onglet, ligne) {
+  var l = LABELS_LIGNE[onglet] && LABELS_LIGNE[onglet][ligne];
+  return onglet + " · " + (l || ("Ligne " + ligne));
+}
+
+/* ---------- PLUIE : écriture / suppression sur les 11 blocs ---------- */
+
+function ecrirePluie(dateValue, mm) {
+  var details = [];
+  blocsIrrigation().forEach(function (B) {
+    var targetRow = resolveTargetRow(B.sheet, B.block, B.cols, dateValue);
+    if (targetRow === -1) { details.push(B.onglet + " Ligne " + B.ligne + " : plus de ligne libre"); return; }
+    setValueColored(B.sheet.getRange(targetRow, B.cols.date), dateValue, COULEUR_PLUIE).setNumberFormat(FORMAT_DATE);
+    setValueColored(B.sheet.getRange(targetRow, B.cols.pluie), mm, COULEUR_PLUIE);
+    details.push(B.onglet + " Ligne " + B.ligne + " : ligne " + targetRow + " OK");
+  });
+  return details;
+}
+
+// Retire la saisie de pluie (date + mm, ou toute la pluie de la date si mm est null) de tous les blocs.
+function retirerPluie(isoJour, mm) {
+  var n = 0;
+  blocsIrrigation().forEach(function (B) {
+    var lignes = lignesBloc(B), last = lignes.length ? lignes[lignes.length - 1].row : -1;
+    for (var k = 0; k < lignes.length; k++) {
+      var v = lignes[k].v;
+      if (!(v[0] instanceof Date) || isoDate(v[0]) !== isoJour) continue;
+      if (typeof v[9] !== "number" || !estVide(v[7])) continue;
+      if (mm !== null && Math.abs(v[9] - mm) > 0.0001) continue;
+      decalerHaut(B.sheet, B.cols.date, B.cols.pluie - B.cols.date + 1, lignes[k].row, last);
+      n++;
+      break; // une seule ligne par bloc pour une saisie (date, mm) ; avec mm = null on boucle ci-dessous
+    }
+  });
+  return n;
+}
+function retirerToutePluieDate(isoJour) {
+  var total = 0, passes = 0;
+  while (passes++ < 10) { var n = retirerPluie(isoJour, null); if (!n) break; total += n; }
+  return total;
+}
+
+function pluieLister() {
+  var blocs = blocsIrrigation();
+  if (!blocs.length) return [];
+  var lignes = lignesBloc(blocs[0]), items = [];
+  for (var k = lignes.length - 1; k >= 0 && items.length < NB_SAISIES_LISTE; k--) {
+    var v = lignes[k].v;
+    if (!(v[0] instanceof Date) || typeof v[9] !== "number" || !estVide(v[7])) continue;
+    var j = isoDate(v[0]);
+    items.push({
+      id: "pluie|" + j + "|" + v[9], module: "pluie",
+      titre: "Pluie " + String(v[9]).replace(".", ",") + " mm", detail: formatDateFR(v[0]) + " · toutes les parcelles",
+      champs: [
+        { k: "date", label: "Date", type: "date", value: j },
+        { k: "mm", label: "Pluie (mm)", type: "number", step: "0.1", value: v[9] }
+      ]
+    });
+  }
+  return items;
+}
+
+function pluieModifier(p, v) {
+  var jOld = p[1], mmOld = Number(p[2]);
+  var mm = nombreChamp(v.mm);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  if (estVide(mm) || isNaN(mm) || mm < 0) return reponse(false, "Pluie invalide.");
+  var n = retirerPluie(jOld, mmOld);
+  if (!n) return reponse(false, MSG_LIGNE_CHANGEE);
+  ecrirePluie(parseDateOnly(v.date), mm);
+  journaliser("Modification", "Pluie", { date: jOld, mm: mmOld }, { date: v.date, mm: mm }, n + " ligne(s) corrigée(s)");
+  return reponse(true, "Pluie corrigée sur toutes les parcelles.");
+}
+
+function pluieSupprimer(p) {
+  var n = retirerPluie(p[1], Number(p[2]));
+  if (!n) return reponse(false, MSG_LIGNE_CHANGEE);
+  journaliser("Suppression", "Pluie", { date: p[1], mm: Number(p[2]) }, null, n + " ligne(s) retirée(s)");
+  return reponse(true, "Pluie supprimée sur toutes les parcelles.");
+}
+
+/* ---------- ARROSAGE ---------- */
+
+function ecrireArrosage(sheet, block, cols, d) {
+  var dateValue = d.date ? parseDateOnly(d.date) : "";
+  var targetRow = resolveTargetRow(sheet, block, cols, dateValue);
+  if (targetRow === -1) return -1;
+  setValueColored(sheet.getRange(targetRow, cols.date), dateValue, COULEUR_ARROSAGE).setNumberFormat(FORMAT_DATE);
+  [["duree", d.duree], ["debut", d.compteur_debut], ["fin", d.compteur_fin], ["m3", d.m3]].forEach(function (c) {
+    var n = nombreChamp(c[1]);
+    if (!estVide(n) && !isNaN(n)) setValueColored(sheet.getRange(targetRow, cols[c[0]]), n, COULEUR_ARROSAGE);
+  });
+  if (d.heure_debut) sheet.getRange(targetRow, cols.heureDebut).setValue(parseHeure(d.heure_debut)).setNumberFormat("HH:mm").setFontColor(COULEUR_ARROSAGE);
+  if (d.heure_fin) sheet.getRange(targetRow, cols.heureFin).setValue(parseHeure(d.heure_fin)).setNumberFormat("HH:mm").setFontColor(COULEUR_ARROSAGE);
+  return targetRow;
+}
+
+function arrosageLister() {
+  var items = [];
+  blocsIrrigation().forEach(function (B) {
+    lignesBloc(B).forEach(function (L) {
+      var v = L.v;
+      if (!(v[0] instanceof Date) || typeof v[7] !== "number" || v[7] <= 0) return;
+      var c1 = typeof v[4] === "number" ? v[4] : "", c2 = typeof v[5] === "number" ? v[5] : "";
+      items.push({
+        _t: v[0].getTime(), _r: L.row,
+        id: ["arrosage", B.onglet, B.ligne, L.row, empreinte([v[0], v[7], v[4], v[5], v[3]])].join("|"),
+        module: "arrosage",
+        titre: libelleLigne(B.onglet, B.ligne) + " · " + Math.round(v[7] * 10) / 10 + " m³",
+        detail: formatDateFR(v[0]) + (c1 !== "" && c2 !== "" ? " · compteur " + c1 + " → " + c2 : ""),
+        champs: [
+          { k: "date", label: "Date", type: "date", value: isoDate(v[0]) },
+          { k: "heure_debut", label: "Heure début", type: "time", value: heureTexte(v[1]) },
+          { k: "heure_fin", label: "Heure fin", type: "time", value: heureTexte(v[2]) },
+          { k: "duree", label: "Durée (h)", type: "number", step: "0.1", value: typeof v[3] === "number" ? v[3] : "" },
+          { k: "compteur_debut", label: "Compteur début", type: "number", step: "any", value: c1 },
+          { k: "compteur_fin", label: "Compteur fin", type: "number", step: "any", value: c2 },
+          { k: "m3", label: "Volume (m³) — calculé si les 2 compteurs sont remplis", type: "number", step: "any", value: v[7] }
+        ]
+      });
+    });
+  });
+  items.sort(function (a, b) { return b._t - a._t || b._r - a._r; });
+  return items.slice(0, NB_SAISIES_LISTE).map(function (i) { delete i._t; delete i._r; return i; });
+}
+
+function arrosageLigneVerifiee(p) {
+  var B = trouverBloc(p[1], p[2]);
+  if (!B) return { err: "Bloc introuvable." };
+  var row = Number(p[3]), c = B.cols;
+  var v = B.sheet.getRange(row, c.date, 1, c.pluie - c.date + 1).getValues()[0];
+  if (empreinte([v[0], v[7], v[4], v[5], v[3]]) !== p[4]) return { err: MSG_LIGNE_CHANGEE };
+  var lignes = lignesBloc(B);
+  return { B: B, row: row, v: v, last: lignes.length ? lignes[lignes.length - 1].row : row };
+}
+
+function arrosageAvant(v) {
+  return { date: v[0] instanceof Date ? isoDate(v[0]) : "", heure_debut: heureTexte(v[1]), heure_fin: heureTexte(v[2]),
+    duree: v[3], compteur_debut: v[4], compteur_fin: v[5], m3: v[7] };
+}
+
+function arrosageModifier(p, v) {
+  var R = arrosageLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  var duree = nombreChamp(v.duree), c1 = nombreChamp(v.compteur_debut), c2 = nombreChamp(v.compteur_fin), m3 = nombreChamp(v.m3);
+  if ([duree, c1, c2, m3].some(function (x) { return typeof x === "number" && isNaN(x); })) return reponse(false, "Une valeur n'est pas un nombre.");
+  if (typeof c1 === "number" && typeof c2 === "number") {
+    if (c2 <= c1) return reponse(false, "Le compteur fin doit être supérieur au compteur début.");
+    m3 = Math.round((c2 - c1) * 10) / 10;
+  }
+  if (typeof m3 !== "number" || m3 <= 0) return reponse(false, "Le volume (m³) doit être supérieur à 0.");
+  var avant = arrosageAvant(R.v);
+  decalerHaut(R.B.sheet, R.B.cols.date, R.B.cols.pluie - R.B.cols.date + 1, R.row, R.last);
+  var apres = { date: v.date, heure_debut: v.heure_debut || "", heure_fin: v.heure_fin || "", duree: duree, compteur_debut: c1, compteur_fin: c2, m3: m3 };
+  var row = ecrireArrosage(R.B.sheet, R.B.block, R.B.cols, apres);
+  if (row === -1) return reponse(false, "Plus de ligne libre dans le tableau.");
+  journaliser("Modification", "Arrosage " + libelleLigne(R.B.onglet, R.B.ligne), avant, apres, "ligne " + row);
+  return reponse(true, "Arrosage corrigé.");
+}
+
+function arrosageSupprimer(p) {
+  var R = arrosageLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  decalerHaut(R.B.sheet, R.B.cols.date, R.B.cols.pluie - R.B.cols.date + 1, R.row, R.last);
+  journaliser("Suppression", "Arrosage " + libelleLigne(R.B.onglet, R.B.ligne), arrosageAvant(R.v), null, "ligne " + R.row);
+  return reponse(true, "Arrosage supprimé.");
+}
+
+/* ---------- HEURES ---------- */
+
+function lignesHeures(sheet) {
+  var max = Math.min(sheet.getMaxRows() - HEURES_DATA_START_ROW + 1, 2000);
+  if (max < 1) return [];
+  var vals = sheet.getRange(HEURES_DATA_START_ROW, HEURES_COL_DATE, max, 6).getValues(), out = [];
+  for (var i = 0; i < vals.length; i++) {
+    if (estVide(vals[i][0])) break;
+    out.push({ row: HEURES_DATA_START_ROW + i, v: vals[i] });
+  }
+  return out;
+}
+
+function ecrireHeures(sheet, dateValue, nom, lieu, tache, duree) {
+  ajouterSiNouveau(sheet, HEURES_LIEU_LIST_COL, HEURES_LIEU_LIST_START, lieu, HEURES_LIEU_RECAP_WIDTH);
+  ajouterSiNouveau(sheet, HEURES_TACHE_LIST_COL, HEURES_TACHE_LIST_START, tache, HEURES_TACHE_RECAP_WIDTH);
+  var targetRow = resolveTargetRowHeures(sheet, dateValue);
+  if (targetRow === -1) return -1;
+  sheet.getRange(targetRow, HEURES_COL_DATE).setValue(dateValue).setNumberFormat(FORMAT_DATE);
+  sheet.getRange(targetRow, HEURES_COL_PERSONNE).setValue(nom);
+  sheet.getRange(targetRow, HEURES_COL_LIEU).setValue(lieu);
+  sheet.getRange(targetRow, HEURES_COL_TACHE).setValue(tache);
+  sheet.getRange(targetRow, HEURES_COL_TEMPS).setValue(duree);
+  sheet.getRange(targetRow, HEURES_COL_HORODATAGE).setValue(new Date()).setNumberFormat("dd/mm/yyyy hh:mm:ss");
+  return targetRow;
+}
+
+function personneCanonique(nom) {
+  var k = normTxt(nom), res = null;
+  HEURES_PERSONNES.forEach(function (p) { if (normTxt(p) === k) res = p; });
+  return res;
+}
+
+function heuresLister() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HEURES_SHEET);
+  if (!sheet) return [];
+  var listes = obtenirListesHeures();
+  var lignes = lignesHeures(sheet);
+  lignes.sort(function (a, b) {
+    var ha = a.v[5] instanceof Date ? a.v[5].getTime() : 0, hb = b.v[5] instanceof Date ? b.v[5].getTime() : 0;
+    return hb - ha || b.row - a.row;
+  });
+  return lignes.slice(0, NB_SAISIES_LISTE).map(function (L) {
+    var v = L.v;
+    return {
+      id: ["heures", L.row, empreinte([v[0], v[1], v[2], v[3], v[4]])].join("|"), module: "heures",
+      titre: (v[1] || "?") + " · " + (v[4] || 0) + " h",
+      detail: formatDateFR(v[0]) + " · " + (v[2] || "") + " · " + (v[3] || ""),
+      champs: [
+        { k: "date", label: "Date", type: "date", value: datePourChamp(v[0]) },
+        { k: "personne", label: "Personne", type: "select", options: HEURES_PERSONNES, value: v[1] },
+        { k: "lieu", label: "Lieu", type: "combo", options: listes.lieux, value: v[2] },
+        { k: "tache", label: "Tâche", type: "combo", options: listes.taches, value: v[3] },
+        { k: "temps", label: "Durée (h)", type: "number", step: "0.25", value: v[4] }
+      ]
+    };
+  });
+}
+
+function heuresLigneVerifiee(p) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HEURES_SHEET);
+  if (!sheet) return { err: "Onglet 'Heures' introuvable." };
+  var row = Number(p[1]);
+  var v = sheet.getRange(row, HEURES_COL_DATE, 1, 6).getValues()[0];
+  if (empreinte([v[0], v[1], v[2], v[3], v[4]]) !== p[2]) return { err: MSG_LIGNE_CHANGEE };
+  var l = lignesHeures(sheet);
+  return { sheet: sheet, row: row, v: v, last: l.length ? l[l.length - 1].row : row };
+}
+
+function heuresAvant(v) { return { date: datePourChamp(v[0]), personne: v[1], lieu: v[2], tache: v[3], temps: v[4] }; }
+
+function heuresModifier(p, v) {
+  var R = heuresLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  var nom = personneCanonique(v.personne), duree = nombreChamp(v.temps);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  if (!nom) return reponse(false, "Personne inconnue : " + v.personne);
+  if (estVide(duree) || isNaN(duree) || duree <= 0) return reponse(false, "Durée invalide.");
+  var listes = obtenirListesHeures();
+  var lieu = canonDans(listes.lieux, v.lieu), tache = canonDans(listes.taches, v.tache);
+  if (!lieu || !tache) return reponse(false, "Lieu et tâche obligatoires.");
+  var avant = heuresAvant(R.v);
+  decalerHaut(R.sheet, HEURES_COL_DATE, 6, R.row, R.last);
+  var row = ecrireHeures(R.sheet, parseDateOnly(v.date), nom, lieu, tache, duree);
+  if (row === -1) return reponse(false, "Plus de ligne libre.");
+  journaliser("Modification", "Heures", avant, { date: v.date, personne: nom, lieu: lieu, tache: tache, temps: duree }, "ligne " + row);
+  return reponse(true, "Saisie d'heures corrigée.");
+}
+
+function heuresSupprimer(p) {
+  var R = heuresLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  decalerHaut(R.sheet, HEURES_COL_DATE, 6, R.row, R.last);
+  journaliser("Suppression", "Heures", heuresAvant(R.v), null, "ligne " + R.row);
+  return reponse(true, "Saisie d'heures supprimée.");
+}
+
+/* ---------- POINTAGE (Récolte pointage) ---------- */
+
+function lignesPointage(sheet) {
+  var max = Math.min(sheet.getMaxRows() - RECOLTE_DATA_START_ROW + 1, 3000);
+  if (max < 1) return [];
+  var vals = sheet.getRange(RECOLTE_DATA_START_ROW, 1, max, RECOLTE_NB_COLS).getValues(), out = [];
+  for (var i = 0; i < vals.length; i++) {
+    if (estVide(vals[i][RECOLTE_COL_DATE - 1])) break;
+    out.push({ row: RECOLTE_DATA_START_ROW + i, v: vals[i] });
+  }
+  return out;
+}
+function empreintePointage(v) { return empreinte([v[0], v[1], v[2], v[3], v[RECOLTE_COL_COMMENT - 1]]); }
+function pointageAvant(v) {
+  return { no: v[0], date: datePourChamp(v[1]), parcelle: v[2], poids: v[3], commentaire: v[RECOLTE_COL_COMMENT - 1] };
+}
+// « Brumale » doit toujours figurer dans le commentaire : l'info reste lisible même si le type change.
+function commentaireAvecBrumale(poids, commentaire) {
+  var c = (commentaire || "").toString().trim();
+  if (poids === "Brumale" && !/brumale/i.test(c)) c = "Brumale" + (c ? " · " + c : "");
+  return c;
+}
+
+function pointageLister() {
+  var sheet = ongletPointage(SpreadsheetApp.getActiveSpreadsheet());
+  if (!sheet) return [];
+  var lignes = lignesPointage(sheet).slice(-NB_SAISIES_LISTE).reverse();
+  return lignes.map(function (L) {
+    var v = L.v, com = v[RECOLTE_COL_COMMENT - 1] || "";
+    return {
+      id: ["pointage", L.row, empreintePointage(v)].join("|"), module: "pointage",
+      titre: "Truffe n°" + v[0] + " · " + v[3],
+      detail: formatDateFR(v[1]) + " · " + (v[2] || "") + (com ? " · " + com : ""),
+      champs: [
+        { k: "date", label: "Date", type: "date", value: datePourChamp(v[1]) },
+        { k: "parcelle", label: "Parcelle", type: "select", options: RECOLTE_PARCELLES, value: v[2] },
+        { k: "poids", label: "Poids / type", type: "select", options: RECOLTE_POIDS, value: v[3] },
+        { k: "commentaire", label: "Commentaire", type: "text", value: com }
+      ]
+    };
+  });
+}
+
+function pointageLigneVerifiee(p) {
+  var sheet = ongletPointage(SpreadsheetApp.getActiveSpreadsheet());
+  if (!sheet) return { err: "Onglet 'Récolte pointage' introuvable." };
+  var row = Number(p[1]);
+  var v = sheet.getRange(row, 1, 1, RECOLTE_NB_COLS).getValues()[0];
+  if (empreintePointage(v) !== p[2]) return { err: MSG_LIGNE_CHANGEE };
+  var l = lignesPointage(sheet);
+  return { sheet: sheet, row: row, v: v, last: l.length ? l[l.length - 1].row : row };
+}
+
+function pointageModifier(p, v) {
+  var R = pointageLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  if (RECOLTE_PARCELLES.indexOf(v.parcelle) === -1) return reponse(false, "Parcelle inconnue : " + v.parcelle);
+  if (RECOLTE_POIDS.indexOf(v.poids) === -1) return reponse(false, "Poids inconnu : " + v.poids);
+  var com = commentaireAvecBrumale(v.poids, v.commentaire);
+  var avant = pointageAvant(R.v);
+  R.sheet.getRange(R.row, RECOLTE_COL_DATE).setValue(parseDateOnly(v.date)).setNumberFormat(FORMAT_DATE);
+  R.sheet.getRange(R.row, RECOLTE_COL_PARCELLE).setValue(v.parcelle);
+  R.sheet.getRange(R.row, RECOLTE_COL_POIDS).setNumberFormat("@").setValue(v.poids);
+  R.sheet.getRange(R.row, RECOLTE_COL_COMMENT).setValue(com);
+  journaliser("Modification", "Pointage", avant, { no: R.v[0], date: v.date, parcelle: v.parcelle, poids: v.poids, commentaire: com }, "ligne " + R.row);
+  return reponse(true, "Truffe corrigée.");
+}
+
+function pointageSupprimer(p) {
+  var R = pointageLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  decalerHaut(R.sheet, 1, RECOLTE_NB_COLS, R.row, R.last);
+  journaliser("Suppression", "Pointage", pointageAvant(R.v), null, "ligne " + R.row);
+  return reponse(true, "Truffe supprimée (les numéros des autres truffes ne changent pas).");
+}
+
+/* ---------- POIDS (Récolte volume) ---------- */
+
+function poidsEnGrammes(info, col, valeur) {
+  if (typeof valeur !== "number") return 0;
+  return (info.units[col] || "g") === "kg" ? Math.round(valeur * 1000) : valeur;
+}
+
+function poidsLister() {
+  var info = infosOngletVolume(false);
+  if (!info) return [];
+  var bloc = lireBlocBorne(info.sheet, info.startRow, 1, info.dernierCol, NB_MAX_LIGNES), lignes = [];
+  for (var i = 0; i < bloc.length; i++) {
+    if (estVide(bloc[i][info.dateCol - 1])) break;
+    lignes.push(i);
+  }
+  var items = [];
+  for (var k = lignes.length - 1; k >= 0 && items.length < NB_SAISIES_LISTE; k--) {
+    var i2 = lignes[k], row = bloc[i2], d = row[info.dateCol - 1];
+    PARCELLES_VOLUME.forEach(function (pv) {
+      var grp = info.groups[pv.key];
+      if (!grp) return;
+      TYPES_POIDS.forEach(function (t) {
+        if (!grp[t]) return;
+        var g = poidsEnGrammes(info, grp[t], row[grp[t] - 1]);
+        if (g <= 0 || !(d instanceof Date)) return;
+        var colCom = info.commentCols[pv.key] || info.commentCol;
+        var com = colCom ? (row[colCom - 1] || "").toString() : "";
+        items.push({
+          id: ["poids", info.startRow + i2, pv.key, t, empreinte([d, g, com])].join("|"), module: "poids",
+          titre: pv.label + " · " + LIBELLES_TYPES[t] + " · " + g + " g",
+          detail: formatDateFR(d) + (com ? " · " + com : ""),
+          champs: [
+            { k: "date", label: "Date", type: "date", value: datePourChamp(d) },
+            { k: "parcelle", label: "Parcelle", type: "select", options: PARCELLES_VOLUME.map(function (x) { return x.label; }), value: pv.label },
+            { k: "type", label: "Type de poids", type: "select", options: TYPES_POIDS.map(function (x) { return { v: x, l: LIBELLES_TYPES[x] }; }), value: t },
+            { k: "poids", label: "Poids (g)", type: "number", step: "1", value: g },
+            { k: "commentaire", label: "Commentaire", type: "text", value: com }
+          ]
+        });
+      });
+    });
+  }
+  return items;
+}
+
+function poidsLigneVerifiee(p) {
+  var info = infosOngletVolume(false);
+  if (!info) return { err: "Onglet 'Récolte volume' introuvable." };
+  var row = Number(p[1]), key = p[2], type = p[3];
+  var grp = info.groups[key];
+  if (!grp || !grp[type]) return { err: "Colonne introuvable." };
+  var vals = info.sheet.getRange(row, 1, 1, info.dernierCol).getValues()[0];
+  var d = vals[info.dateCol - 1], col = grp[type];
+  var g = poidsEnGrammes(info, col, vals[col - 1]);
+  var colCom = info.commentCols[key] || info.commentCol;
+  var com = colCom ? (vals[colCom - 1] || "").toString() : "";
+  if (empreinte([d, g, com]) !== p[4]) return { err: MSG_LIGNE_CHANGEE };
+  return { info: info, row: row, key: key, type: type, col: col, colCom: colCom, vals: vals, d: d, g: g, com: com };
+}
+
+function ligneVolumeSansPoids(info, row) {
+  var vals = info.sheet.getRange(row, 1, 1, info.dernierCol).getValues()[0], reste = false;
+  TYPES_POIDS.forEach(function (t) {
+    colsDuType(info, t).forEach(function (c) { if (typeof vals[c - 1] === "number" && vals[c - 1] > 0) reste = true; });
+  });
+  return !reste;
+}
+
+function retirerCelluleVolume(R) {
+  var info = R.info, sheet = info.sheet;
+  sheet.getRange(R.row, R.col).clearContent();
+  var autres = TYPES_POIDS.some(function (t) {
+    var c = info.groups[R.key][t];
+    return c && c !== R.col && typeof sheet.getRange(R.row, c).getValue() === "number" && sheet.getRange(R.row, c).getValue() > 0;
+  });
+  if (R.colCom && !autres) sheet.getRange(R.row, R.colCom).clearContent();
+  if (ligneVolumeSansPoids(info, R.row)) {
+    var bloc = lireBlocBorne(sheet, info.startRow, 1, info.dateCol, NB_MAX_LIGNES), last = info.startRow - 1;
+    for (var i = 0; i < bloc.length; i++) { if (estVide(bloc[i][info.dateCol - 1])) break; last = info.startRow + i; }
+    decalerHaut(sheet, 1, info.dernierCol, R.row, Math.max(last, R.row));
+  }
+  assurerTotauxVolume(info);
+}
+
+function poidsModifier(p, v) {
+  var R = poidsLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  var g = nombreChamp(v.poids), key = cleParcelleLabel(v.parcelle);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  if (!key) return reponse(false, "Parcelle inconnue.");
+  if (TYPES_POIDS.indexOf(v.type) === -1) return reponse(false, "Type de poids inconnu.");
+  if (estVide(g) || isNaN(g) || g <= 0) return reponse(false, "Poids invalide.");
+  var info = R.info, avant = { date: datePourChamp(R.d), parcelle: R.key, type: R.type, poids: R.g, commentaire: R.com };
+  var apres = { date: v.date, parcelle: v.parcelle, type: v.type, poids: g, commentaire: (v.commentaire || "").toString().trim() };
+  var memeCase = key === R.key && v.type === R.type && jourStr(parseDateOnly(v.date), info.tz) === jourStr(R.d, info.tz);
+  if (memeCase) {
+    var unite = info.units[R.col] || "g";
+    info.sheet.getRange(R.row, R.col).setValue(unite === "kg" ? g / 1000 : g);
+    if (R.colCom) info.sheet.getRange(R.row, R.colCom).setValue(apres.commentaire);
+    assurerTotauxVolume(info);
+  } else {
+    retirerCelluleVolume(R);
+    var res = JSON.parse(handleRecolteVolume({ date: v.date, parcelle: v.parcelle, type: v.type, poids: g, commentaire: apres.commentaire }).getContent());
+    if (!res.ok) return reponse(false, res.error || "Échec de l'écriture.");
+  }
+  journaliser("Modification", "Poids", avant, apres, "");
+  return reponse(true, "Poids corrigé.");
+}
+
+function poidsSupprimer(p) {
+  var R = poidsLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  retirerCelluleVolume(R);
+  journaliser("Suppression", "Poids", { date: datePourChamp(R.d), parcelle: R.key, type: R.type, poids: R.g, commentaire: R.com }, null, "");
+  return reponse(true, "Poids supprimé.");
+}
+
+/* ---------- VENTE ---------- */
+
+function lignesVente(info) {
+  var bloc = lireBlocBorne(info.sheet, info.startRow, 1, info.dernierCol, NB_MAX_LIGNES), out = [];
+  for (var i = 0; i < bloc.length; i++) {
+    if (estVide(bloc[i][0])) break;
+    out.push({ row: info.startRow + i, v: bloc[i] });
+  }
+  return out;
+}
+function empreinteVente(info, v) {
+  var a = [v[0], info.clientCol ? v[info.clientCol - 1] : ""];
+  QUALITES_VENTE.forEach(function (q) { a.push(v[info.cols[q.key].prix - 1], v[info.cols[q.key].poids - 1]); });
+  return empreinte(a);
+}
+function venteAvant(info, v) {
+  var o = { date: datePourChamp(v[0]), client: info.clientCol ? v[info.clientCol - 1] : "", q: {} };
+  QUALITES_VENTE.forEach(function (q) {
+    var w = v[info.cols[q.key].poids - 1];
+    if (typeof w === "number" && w > 0) o.q[q.label] = { prix: v[info.cols[q.key].prix - 1], poids: w };
+  });
+  return o;
+}
+
+function venteLister() {
+  var info = infosOngletVente(false);
+  if (!info) return [];
+  var clients = info.listCol ? lireListeClients(info) : CLIENTS_PAR_DEFAUT.slice();
+  return lignesVente(info).slice(-NB_SAISIES_LISTE).reverse().map(function (L) {
+    var v = L.v, champs = [
+      { k: "date", label: "Date", type: "date", value: datePourChamp(v[0]) },
+      { k: "client", label: "Client", type: "combo", options: clients, value: info.clientCol ? (v[info.clientCol - 1] || "") : "" }
+    ], g = 0, eur = 0;
+    QUALITES_VENTE.forEach(function (q) {
+      var pr = v[info.cols[q.key].prix - 1], w = v[info.cols[q.key].poids - 1];
+      if (typeof w === "number" && w > 0) { g += w; eur += (Number(pr) || 0) * w / 1000; }
+      champs.push({ k: "prix_" + q.key, label: q.label + " — prix (€/kg)", type: "number", step: "0.01", value: typeof pr === "number" ? pr : "" });
+      champs.push({ k: "poids_" + q.key, label: q.label + " — poids (g)", type: "number", step: "1", value: typeof w === "number" ? w : "" });
+    });
+    return {
+      id: ["vente", L.row, empreinteVente(info, v)].join("|"), module: "vente",
+      titre: (info.clientCol && v[info.clientCol - 1] ? v[info.clientCol - 1] : "Vente") + " · " + Math.round(eur * 100) / 100 + " €",
+      detail: formatDateFR(v[0]) + " · " + g + " g", champs: champs
+    };
+  });
+}
+
+function venteLigneVerifiee(p) {
+  var info = infosOngletVente(false);
+  if (!info) return { err: "Onglet 'Vente' introuvable." };
+  var row = Number(p[1]);
+  var v = info.sheet.getRange(row, 1, 1, info.dernierCol).getValues()[0];
+  if (empreinteVente(info, v) !== p[2]) return { err: MSG_LIGNE_CHANGEE };
+  var l = lignesVente(info);
+  return { info: info, row: row, v: v, last: l.length ? l[l.length - 1].row : row };
+}
+
+function venteModifier(p, v) {
+  var R = venteLigneVerifiee(p), info = R.info;
+  if (R.err) return reponse(false, R.err);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  var lignes = [];
+  for (var i = 0; i < QUALITES_VENTE.length; i++) {
+    var q = QUALITES_VENTE[i], pr = nombreChamp(v["prix_" + q.key]), w = nombreChamp(v["poids_" + q.key]);
+    if (estVide(pr) && estVide(w)) continue;
+    if (isNaN(pr) || isNaN(w) || estVide(pr) || estVide(w) || pr <= 0 || w <= 0) return reponse(false, "Prix et poids doivent tous deux être renseignés (et positifs) pour « " + q.label + " ».");
+    lignes.push({ qualite: q.label, prix: Math.round(pr * 100) / 100, poids: Math.round(w) });
+  }
+  if (!lignes.length) return reponse(false, "Renseigne au moins une qualité.");
+  var info2 = assurerColonnesClient(info);
+  var client = canonDans(info2.listCol ? lireListeClients(info2) : [], v.client);
+  var avant = venteAvant(info, R.v);
+  var memeLigne = jourStr(parseDateOnly(v.date), info.tz) === jourStr(R.v[0], info.tz) &&
+    normTxt(client) === normTxt(info.clientCol ? R.v[info.clientCol - 1] : "");
+  if (memeLigne) {
+    QUALITES_VENTE.forEach(function (q) {
+      var cp = info.sheet.getRange(R.row, info.cols[q.key].prix), cw = info.sheet.getRange(R.row, info.cols[q.key].poids);
+      var l = lignes.filter(function (x) { return x.qualite === q.label; })[0];
+      if (l) { cp.setValue(l.prix); cw.setValue(l.poids); } else { cp.clearContent(); cw.clearContent(); }
+    });
+    if (info.clientCol && client) info.sheet.getRange(R.row, info.clientCol).setValue(client);
+    ajouterClientSiNouveau(info2, client);
+    assurerTotauxVente(info);
+  } else {
+    decalerHaut(info.sheet, 1, info.dernierCol, R.row, R.last);
+    var res = JSON.parse(handleVente({ date: v.date, client: client, lignes: lignes }).getContent());
+    if (!res.ok) return reponse(false, res.error || "Échec de l'écriture.");
+  }
+  journaliser("Modification", "Vente", avant, { date: v.date, client: client, q: lignes }, "");
+  return reponse(true, "Vente corrigée.");
+}
+
+function venteSupprimer(p) {
+  var R = venteLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  decalerHaut(R.info.sheet, 1, R.info.dernierCol, R.row, R.last);
+  assurerTotauxVente(R.info);
+  journaliser("Suppression", "Vente", venteAvant(R.info, R.v), null, "ligne " + R.row);
+  return reponse(true, "Vente supprimée.");
+}
+
+/* ---------- Point d'entrée : liste / modifier / supprimer ---------- */
+
+function obtenirSaisies(module) {
+  var f = { arrosage: arrosageLister, pluie: pluieLister, heures: heuresLister, pointage: pointageLister, poids: poidsLister, vente: venteLister }[module];
+  if (!f) return { module: module, items: [], error: "Module inconnu." };
+  return { module: module, items: f() };
+}
+
+function modifierSaisie(id, valeurs) {
+  try {
+    return avecVerrou(function () {
+      var p = String(id || "").split("|");
+      var f = { arrosage: arrosageModifier, pluie: pluieModifier, heures: heuresModifier, pointage: pointageModifier, poids: poidsModifier, vente: venteModifier }[p[0]];
+      if (!f) return reponse(false, "Saisie inconnue.");
+      var r = f(p, valeurs || {});
+      SpreadsheetApp.flush();
+      return r;
+    });
+  } catch (e) { return reponse(false, "Erreur : " + e.message); }
+}
+
+function supprimerSaisie(id) {
+  try {
+    return avecVerrou(function () {
+      var p = String(id || "").split("|");
+      var f = { arrosage: arrosageSupprimer, pluie: pluieSupprimer, heures: heuresSupprimer, pointage: pointageSupprimer, poids: poidsSupprimer, vente: venteSupprimer }[p[0]];
+      if (!f) return reponse(false, "Saisie inconnue.");
+      var r = f(p);
+      SpreadsheetApp.flush();
+      return r;
+    });
+  } catch (e) { return reponse(false, "Erreur : " + e.message); }
+}
+
+/* ---------- Contrôle avant enregistrement ---------- */
+
+function controlerSaisie(p) {
+  var alertes = [], mode = p.mode;
+  function avertir(t) { alertes.push({ niveau: "warn", texte: t }); }
+  function bloquer(t) { alertes.push({ niveau: "stop", texte: t }); }
+  var res = { alertes: alertes, remplacable: false };
+
+  if (dateIsoValide(p.date)) {
+    var auj = parseDateOnly(isoDate(new Date())), d = parseDateOnly(p.date);
+    var diff = Math.round((d.getTime() - auj.getTime()) / 86400000);
+    if (diff > 0) avertir("La date (" + jourSemaineFR(d) + ") est dans le futur.");
+    else if (diff < -7) avertir("La date est ancienne : " + jourSemaineFR(d) + " (il y a " + (-diff) + " jours).");
+  } else if (mode !== "recolte") {
+    bloquer("La date est invalide.");
+  }
+
+  if (mode === "pluie") {
+    var mm = nombreChamp(p.mm);
+    if (estVide(mm) || isNaN(mm) || mm < 0) bloquer("La pluie n'est pas un nombre valide.");
+    else if (mm >= 80) avertir("Pluie très élevée : " + mm + " mm en un jour. Est-ce bien exact ?");
+    var blocs = blocsIrrigation();
+    if (blocs.length && dateIsoValide(p.date)) {
+      var deja = [];
+      lignesBloc(blocs[0]).forEach(function (L) {
+        if (L.v[0] instanceof Date && isoDate(L.v[0]) === p.date && typeof L.v[9] === "number" && estVide(L.v[7])) deja.push(L.v[9]);
+      });
+      if (deja.length) {
+        avertir("Une pluie est déjà saisie ce jour-là : " + deja.join(" + ").replace(/\./g, ",") + " mm. Tu peux la remplacer ou ajouter celle-ci en plus.");
+        res.remplacable = true;
+      }
+    }
+  }
+
+  if (mode === "arrosage") {
+    var c1 = nombreChamp(p.compteur_debut), c2 = nombreChamp(p.compteur_fin), m3 = nombreChamp(p.m3), du = nombreChamp(p.duree);
+    if (typeof c1 === "number" && typeof c2 === "number" && !isNaN(c1) && !isNaN(c2)) {
+      if (c2 <= c1) bloquer("Le compteur fin (" + c2 + ") doit être supérieur au compteur début (" + c1 + ").");
+      else if (typeof m3 === "number" && Math.abs((c2 - c1) - m3) > 1) avertir("Le volume saisi (" + m3 + " m³) ne correspond pas à l'écart des compteurs (" + Math.round((c2 - c1) * 10) / 10 + " m³).");
+    }
+    if (typeof m3 === "number" && !isNaN(m3) && m3 <= 0) bloquer("Le volume doit être supérieur à 0.");
+    if (typeof du === "number" && du > 48) avertir("Durée de " + du + " h : très longue. Est-ce bien exact ?");
+    var B = trouverBloc(p.onglet, p.ligne);
+    if (B && dateIsoValide(p.date)) {
+      var memeJour = false, precedent = null;
+      lignesBloc(B).forEach(function (L) {
+        if (!(L.v[0] instanceof Date) || typeof L.v[7] !== "number" || L.v[7] <= 0) return;
+        if (isoDate(L.v[0]) === p.date) memeJour = true;
+      });
+      if (memeJour) avertir("Un arrosage est déjà saisi ce jour-là sur " + libelleLigne(p.onglet, p.ligne) + ".");
+      // continuité des compteurs : le compteur début doit reprendre le dernier compteur fin de l'onglet
+      var dernier = null;
+      blocsIrrigation().forEach(function (b2) {
+        if (normTxt(b2.onglet) !== normTxt(p.onglet)) return;
+        lignesBloc(b2).forEach(function (L) {
+          if (!(L.v[0] instanceof Date) || typeof L.v[5] !== "number" || typeof L.v[7] !== "number" || L.v[7] <= 0) return;
+          if (isoDate(L.v[0]) > p.date) return;
+          if (!dernier || L.v[0].getTime() >= dernier.t) dernier = { t: L.v[0].getTime(), fin: L.v[5] };
+        });
+      });
+      if (dernier && typeof c1 === "number" && !isNaN(c1) && Math.abs(dernier.fin - c1) > 0.5) {
+        avertir("Le compteur début (" + c1 + ") ne reprend pas le dernier compteur fin de cet onglet (" + dernier.fin + ").");
+      }
+    }
+  }
+
+  if (mode === "heures") {
+    var du2 = nombreChamp(p.duree);
+    if (estVide(du2) || isNaN(du2) || du2 <= 0) bloquer("La durée n'est pas valide.");
+    else {
+      if (du2 > 12) avertir("Durée de " + du2 + " h en une seule saisie : est-ce bien exact ?");
+      var sheetH = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HEURES_SHEET);
+      var nom = personneCanonique(p.nom) || p.nom;
+      if (sheetH && dateIsoValide(p.date)) {
+        var total = 0, doublon = false;
+        lignesHeures(sheetH).forEach(function (L) {
+          if (!(L.v[0] instanceof Date) || isoDate(L.v[0]) !== p.date) return;
+          if (normTxt(L.v[1]) !== normTxt(nom)) return;
+          total += Number(L.v[4]) || 0;
+          if (normTxt(L.v[2]) === normTxt(p.lieu) && normTxt(L.v[3]) === normTxt(p.tache)) doublon = true;
+        });
+        if (doublon) avertir(nom + " a déjà une saisie pour le même lieu et la même tâche ce jour-là.");
+        if (total + du2 > 12) avertir(nom + " aurait " + (Math.round((total + du2) * 100) / 100) + " h ce jour-là (" + total + " h déjà saisies).");
+      }
+    }
+  }
+
+  if (mode === "recolteVolume") {
+    var g = nombreChamp(p.poids);
+    if (estVide(g) || isNaN(g) || g <= 0) bloquer("Le poids n'est pas valide.");
+    else if (g > 10000) avertir("Poids de " + g + " g : est-ce bien exact ?");
+    var info = infosOngletVolume(false), key = cleParcelleLabel(p.parcelle);
+    if (info && !info.error && key && info.groups[key] && info.groups[key][p.type] && dateIsoValide(p.date)) {
+      var col = info.groups[key][p.type];
+      lireBlocBorne(info.sheet, info.startRow, 1, info.dernierCol, NB_MAX_LIGNES).forEach(function (row) {
+        if (row[info.dateCol - 1] instanceof Date && isoDate(row[info.dateCol - 1]) === p.date && typeof row[col - 1] === "number" && row[col - 1] > 0) {
+          avertir("Il y a déjà " + poidsEnGrammes(info, col, row[col - 1]) + " g de ce type pour cette parcelle ce jour-là : le poids saisi va s'ajouter.");
+        }
+      });
+    }
+  }
+
+  if (mode === "vente") {
+    (p.lignes || []).forEach(function (l) {
+      if (Number(l.prix) > 3000) avertir("Prix de " + l.prix + " €/kg pour « " + l.qualite + " » : est-ce bien exact ?");
+      if (Number(l.poids) > 5000) avertir("Poids de " + l.poids + " g pour « " + l.qualite + " » : est-ce bien exact ?");
+    });
+    var infoV = infosOngletVente(false);
+    if (infoV && !infoV.error && infoV.clientCol && dateIsoValide(p.date)) {
+      var cl = canonDans(infoV.listCol ? lireListeClients(infoV) : [], p.client);
+      lignesVente(infoV).forEach(function (L) {
+        if (L.v[0] instanceof Date && isoDate(L.v[0]) === p.date && normTxt(L.v[infoV.clientCol - 1]) === normTxt(cl)) {
+          avertir("Une vente existe déjà ce jour-là pour " + (cl || "ce client (sans nom)") + " : les poids vont s'additionner sur la même ligne.");
+        }
+      });
+    }
+  }
+  return res;
 }

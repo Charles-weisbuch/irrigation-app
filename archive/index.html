@@ -452,8 +452,8 @@
     transition: width .15s ease-out;
   }
   .poids-btn .hold-label{ position: relative; z-index: 1; }
-  /* Appui long : le bouton se remplit de gauche à droite en 3 s */
-  .poids-btn.holding .hold-fill{ width: 100%; transition: width 3s linear; }
+  /* Appui long : le bouton se remplit de gauche à droite en 2 s */
+  .poids-btn.holding .hold-fill{ width: 100%; transition: width 2s linear; }
   .poids-btn.saving .hold-fill{ width: 100%; background: #CFE3D6; transition: none; }
   .poids-btn.done{ background: #2E7D4F; border-color: #2E7D4F; color: #fff; }
   .poids-btn.done .hold-fill{ width: 100%; background: #2E7D4F; transition: none; }
@@ -465,6 +465,8 @@
   }
   .hold-hint.warn{ color: var(--danger); }
   .poids-btn.large{ grid-column: 1 / -1; }
+  .poids-btn.brumale{ border-color:#FF00A8; color:#C4007F; }
+  .poids-btn.brumale .hold-fill{ background:#FFC2E8; }
 
   /* ---------- Lien de consultation ---------- */
   .consult-link{
@@ -1534,13 +1536,13 @@ function arrondiHeures(n){
 }
 
 /* ============================================================
-   RÉCOLTE — pointage (appui long 3 s), poids après récolte, carte
+   RÉCOLTE — pointage (appui long 2 s), poids après récolte, carte
    ============================================================ */
 const RECOLTE_PARCELLES = ["La Fontaine", "La Baume", "Bousquet", "Riou", "Les Pilles"];
-const RECOLTE_POIDS = ["<10 g", "20 g", "50 g", "100 g", ">100 g"];
-const HOLD_MS = 3000; // durée d'appui pour valider une truffe
-const COULEURS_POIDS = { "<10 g": "#D9B44A", "20 g": "#E08E3C", "50 g": "#C0502D", "100 g": "#8E2C2C", ">100 g": "#5B1A3A" };
-const RAYONS_POIDS = { "<10 g": 6, "20 g": 7, "50 g": 8, "100 g": 9, ">100 g": 10 };
+const RECOLTE_POIDS = ["<10 g", "20 g", "50 g", "100 g", ">100 g", "Brumale"];
+const HOLD_MS = 2000; // durée d'appui pour valider une truffe
+const COULEURS_POIDS = { "<10 g": "#D9B44A", "20 g": "#E08E3C", "50 g": "#C0502D", "100 g": "#8E2C2C", ">100 g": "#5B1A3A", "Brumale": "#FF00A8" };
+const RAYONS_POIDS = { "<10 g": 6, "20 g": 7, "50 g": 8, "100 g": 9, ">100 g": 10, "Brumale": 12 };
 
 function escapeHtml(t){
   return String(t == null ? "" : t).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -1624,7 +1626,7 @@ function rendreListeRecoltes(d){
   box.innerHTML = `
     <div class="total-list">
       ${d.rows.map(r => `
-        <div class="total-row recent-row">
+        <div class="total-row recent-row"${r.poids === "Brumale" ? ' style="background:#FF00A8;color:#fff;font-weight:700;border-radius:8px;padding-left:8px;padding-right:8px;"' : ''}>
           <span class="t-label">n°${escapeHtml(r.no)} · ${escapeHtml(r.date)} · ${escapeHtml(r.parcelle)}</span>
           <span class="t-value">${escapeHtml(r.poids)}</span>
         </div>
@@ -1639,7 +1641,7 @@ async function lireRecoltes(){
   return d;
 }
 
-/* ---------- Pointage récolte : un appui de 3 s sur le poids = une truffe ---------- */
+/* ---------- Pointage récolte : un appui de 2 s sur le poids = une truffe ---------- */
 function renderRecolteSaisie(parcelle){
   const needsSetup = SCRIPT_URL.indexOf("COLLE_ICI") === 0;
   app.innerHTML = `
@@ -1658,9 +1660,9 @@ function renderRecolteSaisie(parcelle){
         <input type="text" id="r_comment" placeholder="ex : au pied du chêne n°12" autocomplete="off">
       </div>
       <div class="poids-grid">
-        ${RECOLTE_POIDS.map((w, i) => `<button type="button" class="poids-btn${i === RECOLTE_POIDS.length - 1 ? ' large' : ''}" data-poids="${escapeHtml(w)}"><span class="hold-fill"></span><span class="hold-label">${escapeHtml(w)}</span></button>`).join("")}
+        ${RECOLTE_POIDS.map((w, i) => `<button type="button" class="poids-btn${w === 'Brumale' ? ' brumale' : ''}" data-poids="${escapeHtml(w)}"><span class="hold-fill"></span><span class="hold-label">${escapeHtml(w)}</span></button>`).join("")}
       </div>
-      <p class="hold-hint" id="holdHint">Maintiens un poids appuyé 3 secondes pour enregistrer la truffe.</p>
+      <p class="hold-hint" id="holdHint">Maintiens un choix appuyé 2 secondes pour enregistrer la truffe.</p>
       <div class="status" id="recolteStatus"></div>
       <button class="consult-link" id="openCarte" style="margin-top:6px;">
         <span class="consult-icon">🗺️</span><span>Carte des récoltes</span><span class="consult-chevron">›</span>
@@ -1786,7 +1788,7 @@ function renderRecolteSaisie(parcelle){
       if(!timer) return;
       clearTimeout(timer); timer = null; holdActif = false;
       btn.classList.remove("holding");
-      hint.textContent = "Appui trop court — maintiens le poids 3 secondes.";
+      hint.textContent = "Appui trop court — maintiens le choix 2 secondes.";
       hint.classList.add("warn");
     }
     btn.addEventListener("pointerdown", () => {
@@ -2395,17 +2397,19 @@ async function renderCarteRecoltes(retour){
       const pts = await fetchJSONP("pointsRecolte");
       if(!carteEtat || carteEtat.map !== map) return;
       couchePoints.clearLayers();
-      const lls = [];
+      const lls = [], brumales = [];
       pts.forEach(p => {
         const m = L.circleMarker([p.lat, p.lon], {
           radius: RAYONS_POIDS[p.poids] || 7, color: "#ffffff", weight: 2,
           fillColor: COULEURS_POIDS[p.poids] || "#6B4423", fillOpacity: 0.95
         });
+        if(p.poids === "Brumale"){ m.setStyle({ color: "#111111", weight: 3 }); brumales.push(m); }
         m.bindPopup("<b>n°" + escapeHtml(p.no) + "</b> · " + escapeHtml(p.date) + "<br>" + escapeHtml(p.parcelle) +
           "<br><b>" + escapeHtml(p.poids) + "</b>" + (p.commentaire ? "<br>" + escapeHtml(p.commentaire) : ""));
         m.addTo(couchePoints);
         lls.push([p.lat, p.lon]);
       });
+      brumales.forEach(m => m.bringToFront()); // les brumales restent visibles au-dessus des autres points
       bornes = lls.length ? L.latLngBounds(lls) : null;
       const h = new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
       compte.textContent = pts.length + " truffe" + (pts.length > 1 ? "s" : "") + " pointée" + (pts.length > 1 ? "s" : "") + " · mis à jour " + h;
