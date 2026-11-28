@@ -709,6 +709,24 @@
   .field select{ width:100%; border:1.5px solid #E1DACB; background:#fff; border-radius:12px; padding:14px; font-size:17px; color:var(--ink); font-family:inherit; }
   .corr-msg{ margin:8px 0; font-size:14px; font-weight:600; }
   .corr-msg.ok{ color:#2E6B3E; } .corr-msg.err{ color:var(--danger); }
+  /* ---------- Bilan (analyse) ---------- */
+  .bcard{ background:#fff; border-radius:16px; box-shadow:var(--shadow); padding:14px 14px 12px; margin-bottom:12px; }
+  .bcard h3{ margin:0 0 8px; font-family:Georgia,serif; font-size:16px; color:var(--green-deep); display:flex; align-items:center; gap:8px; }
+  .bbig{ font-size:30px; font-weight:800; color:var(--green-deep); line-height:1.1; }
+  .bbig small{ font-size:14px; font-weight:600; color:var(--ink-soft); }
+  .bsub{ font-size:13px; color:var(--ink-soft); margin:3px 0 8px; line-height:1.4; }
+  .bbar{ height:10px; border-radius:6px; background:#ECE7DA; overflow:hidden; margin:3px 0 2px; }
+  .bbar i{ display:block; height:100%; border-radius:6px; background:var(--green-mid); }
+  .brow{ margin:9px 0; }
+  .brow .l{ display:flex; justify-content:space-between; gap:8px; font-size:14px; font-weight:600; color:var(--ink); }
+  .brow .l span:last-child{ font-weight:800; white-space:nowrap; }
+  .brow .s{ font-size:12px; color:var(--ink-soft); }
+  .ok-c{ background:#3E8A55 !important; } .mid-c{ background:#E0A526 !important; } .bad-c{ background:#C0502D !important; }
+  .bwarn{ background:#FFF3D6; border:1px solid #E8C468; color:#6B4A00; border-radius:10px; padding:8px 10px; font-size:13px; margin-top:8px; }
+  .bkpis{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:6px 0 4px; }
+  .bkpi{ background:#F5F1E8; border-radius:12px; padding:9px 10px; }
+  .bkpi b{ display:block; font-size:19px; color:var(--green-deep); } .bkpi span{ font-size:12px; color:var(--ink-soft); }
+  .bupd{ text-align:center; font-size:12px; color:var(--ink-soft); margin:2px 0 18px; }
 </style>
 </head>
 <body>
@@ -811,8 +829,8 @@ function renderChoice(){
   stopCarte();
   app.innerHTML = `
     <header class="compact home-head">
-      <h1>SCEA Les Pilles</h1>
-      <span style="display:flex;gap:6px;"><button class="sheet-btn" id="openCorriger" type="button">✏️ Corriger</button><button class="sheet-btn" id="openSheet" type="button">📄 Fichier</button></span>
+      <h1>Les Pilles</h1>
+      <span style="display:flex;gap:6px;"><button class="sheet-btn" id="openBilan" type="button">📈 Bilan</button><button class="sheet-btn" id="openCorriger" type="button">✏️ Corriger</button><button class="sheet-btn" id="openSheet" type="button" aria-label="Fichier Google">📄</button></span>
     </header>
     <main class="home">
       <section class="pole" style="--rows:1">
@@ -864,6 +882,7 @@ function renderChoice(){
   document.getElementById("choiceConsultationVente").addEventListener("click", renderConsultationVente);
   document.getElementById("openSheet").addEventListener("click", ouvrirFichierGoogle);
   document.getElementById("openCorriger").addEventListener("click", () => renderCorriger());
+  document.getElementById("openBilan").addEventListener("click", () => renderBilan());
   preparerUrlFichier();
 }
 
@@ -921,10 +940,90 @@ function fetchJSONP(action, params){
 function fetchBilansJSONP(){ return fetchJSONP("bilans"); }
 
 /* ============================================================
+   📈 BILAN — stock, eau, rendement, ventes, heures
+   ============================================================ */
+let analyseCache = null;
+function nf(n, d){ return (n == null || isNaN(n)) ? "–" : Number(n).toLocaleString("fr-FR", { maximumFractionDigits: d == null ? 0 : d }); }
+function fmtKg(g){ return g == null ? "–" : (Math.abs(g) >= 1000 ? nf(g / 1000, 2) + " kg" : nf(g) + " g"); }
+function barre(pct, cls){ const p = Math.max(0, Math.min(100, pct || 0)); return `<div class="bbar"><i class="${cls || ""}" style="width:${p}%"></i></div>`; }
+function clsTaux(t){ return t == null ? "" : t >= 0.9 ? "ok-c" : t >= 0.7 ? "mid-c" : "bad-c"; }
+
+function renderBilan(force){
+  currentTab = null; currentLigne = null; stopCarte();
+  app.innerHTML = `
+    <header class="compact"><div class="back-row"><button class="back-btn" id="backBtn">‹</button></div><h1>Bilan de saison</h1></header>
+    <main class="compact"><div id="bilanBody"><p class="loading-msg">Calcul en cours…</p></div></main>`;
+  document.getElementById("backBtn").addEventListener("click", renderChoice);
+  if(analyseCache && !force){ dessinerBilan(analyseCache); }
+  fetchJSONP("analyse").then(d => { analyseCache = d; dessinerBilan(d); })
+    .catch(() => { if(!analyseCache) document.getElementById("bilanBody").innerHTML = `<p class="status err">✗ Impossible de charger le bilan (réseau). Réessaie.</p>`; });
+}
+
+function dessinerBilan(d){
+  const el = document.getElementById("bilanBody"); if(!el) return;
+  if(!d || d.ok === false){ el.innerHTML = `<p class="status err">✗ ${escapeHtml((d && d.error) || "Erreur")}</p>`; return; }
+  const s = d.stock, r = d.recolte, e = d.eau, v = d.ventes, h = d.heures;
+  let html = "";
+
+  // --- STOCK
+  const pctVendu = s.net > 0 ? s.vendu / s.net * 100 : 0;
+  html += `<div class="bcard"><h3>📦 Stock de truffes</h3>
+    <div class="bbig">${fmtKg(Math.max(s.stock, 0))} <small>à vendre (net)</small></div>
+    ${barre(pctVendu, pctVendu > 100 ? "bad-c" : "")}
+    <div class="bsub">Net récolté après lavage et tri <b>${fmtKg(s.net)}</b> · vendu <b>${fmtKg(s.vendu)}</b> (${nf(pctVendu)} %)${s.perte != null ? ` · perte au lavage <b>${nf(s.perte * 100, 1)} %</b>` : ""}</div>
+    ${s.negatif ? `<div class="bwarn">⚠️ Tu as vendu plus que le poids net saisi : il manque probablement des poids nets dans « Poids ».</div>` : ""}</div>`;
+
+  // --- EAU
+  const lignes = e.lignes.filter(l => l.besoins > 0);
+  html += `<div class="bcard"><h3>💧 Eau — mai à septembre</h3>
+    <div class="bsub">Pluie + arrosage comparés aux besoins de la plante. Dernière pluie : <b>${e.joursDepuisPluie == null ? "–" : e.joursDepuisPluie === 0 ? "aujourd'hui" : "il y a " + e.joursDepuisPluie + " j"}</b> · ${nf(e.pluie30, 1)} mm sur 30 jours</div>`;
+  lignes.slice().sort((a, b) => (a.taux || 0) - (b.taux || 0)).forEach(l => {
+    html += `<div class="brow"><div class="l"><span>${escapeHtml(l.label)}</span><span>${nf((l.taux || 0) * 100)} %</span></div>${barre((l.taux || 0) * 100, clsTaux(l.taux))}
+      <div class="s">${nf(l.cumul)} / ${nf(l.besoins)} mm (pluie ${nf(l.pluie)} + arrosage ${nf(l.arrosage)}) · ${l.dernierArrosage ? "arrosé le " + fmtDateJJMM(l.dernierArrosage).slice(0, 5) : "jamais arrosé"}</div></div>`;
+  });
+  html += `<div class="s" style="font-size:12px;color:var(--ink-soft)">Vert ≥ 90 % · orange 70–90 % · rouge < 70 % des besoins. Triées de la plus en manque à la mieux servie.</div></div>`;
+
+  // --- RENDEMENT
+  const pc = r.parcelles.filter(p => p.base > 0 || p.truffes > 0);
+  const maxKg = Math.max.apply(null, pc.map(p => p.kgHa || 0).concat([0.001]));
+  html += `<div class="bcard"><h3>🧺 Récolte et rendement</h3>
+    <div class="bkpis"><div class="bkpi"><b>${fmtKg(r.recolte)}</b><span>récolté (poids relevé)</span></div><div class="bkpi"><b>${nf(r.truffes)}</b><span>truffes pointées${r.brumales ? " dont " + r.brumales + " Brumale" : ""}</span></div></div>`;
+  pc.slice().sort((a, b) => (b.kgHa || 0) - (a.kgHa || 0)).forEach(p => {
+    html += `<div class="brow"><div class="l"><span>${escapeHtml(p.label)}</span><span>${p.kgHa == null ? "–" : nf(p.kgHa, 2) + " kg/ha"}</span></div>${barre((p.kgHa || 0) / maxKg * 100)}
+      <div class="s">${fmtKg(p.base)} sur ${nf(p.surface, 2)} ha irrigués · ${p.truffes} truffe${p.truffes > 1 ? "s" : ""} pointée${p.truffes > 1 ? "s" : ""}${p.brumales ? " (" + p.brumales + " Brumale)" : ""}</div></div>`;
+  });
+  html += `<div class="s" style="font-size:12px;color:var(--ink-soft)">Rendement = poids relevé (le plus grand de brut / lavé / net à chaque date) ÷ surface irriguée de la parcelle.</div></div>`;
+
+  // --- VENTES
+  const maxE = Math.max.apply(null, v.clients.map(c => c.euros).concat([1]));
+  html += `<div class="bcard"><h3>💶 Ventes</h3>
+    <div class="bkpis"><div class="bkpi"><b>${nf(v.euros, 0)} €</b><span>chiffre d'affaires</span></div><div class="bkpi"><b>${nf(v.prixMoyen, 0)} €/kg</b><span>prix moyen · ${fmtKg(v.g)} vendus</span></div></div>`;
+  v.clients.slice(0, 5).forEach(c => {
+    html += `<div class="brow"><div class="l"><span>${escapeHtml(c.client)}</span><span>${nf(c.euros)} €</span></div>${barre(c.euros / maxE * 100)}<div class="s">${fmtKg(c.g)} · ${c.ventes} vente${c.ventes > 1 ? "s" : ""}</div></div>`;
+  });
+  if(v.qualites.length){
+    html += `<div class="s" style="margin-top:6px"><b>Par qualité :</b> ` + v.qualites.map(q => `${escapeHtml(q.label)} ${fmtKg(q.g)}${q.prix ? " à " + nf(q.prix, 0) + " €/kg" : ""}`).join(" · ") + `</div>`;
+  }
+  html += `</div>`;
+
+  // --- HEURES
+  const maxH = Math.max.apply(null, h.parTache.map(t => t.total).concat([1]));
+  html += `<div class="bcard"><h3>⏱️ Heures de travail</h3><div class="bbig">${nf(h.total, 1)} <small>h au total</small></div>
+    <div class="bsub">${h.parPersonne.map(p => escapeHtml(p.label) + " " + nf(p.total, 1) + " h").join(" · ")}</div>`;
+  h.parTache.forEach(t => {
+    html += `<div class="brow"><div class="l"><span>${escapeHtml(t.label)}</span><span>${nf(t.total, 1)} h</span></div>${barre(t.total / maxH * 100)}</div>`;
+  });
+  html += `</div><div class="bupd">Mis à jour le ${escapeHtml(d.maj)} · <a href="#" id="bilanRefresh">Actualiser</a></div>`;
+  el.innerHTML = html;
+  const rf = document.getElementById("bilanRefresh");
+  if(rf) rf.addEventListener("click", ev => { ev.preventDefault(); renderBilan(true); });
+}
+
+/* ============================================================
    VÉRIFIE AVANT D'ENREGISTRER + CORRIGER LES SAISIES
    ============================================================ */
 function oublierCaches(){
-  bilansCache = null; bilanHeuresCache = null; signaturePeseesConnue = null; signatureVentesConnue = null;
+  bilansCache = null; bilanHeuresCache = null; signaturePeseesConnue = null; signatureVentesConnue = null; analyseCache = null;
 }
 function fmtDateJJMM(iso){ const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ""); return m ? m[3] + "/" + m[2] + "/" + m[1] : (iso || ""); }
 

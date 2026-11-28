@@ -161,13 +161,33 @@ function doGet(e) {
     return ContentService.createTextOutput(json4).setMimeType(ContentService.MimeType.JSON);
   }
 
+  // Contrôle avant enregistrement, liste / correction / suppression des saisies (réponse lue par l'appli).
+  var actionsSaisies = {
+    controle: function () { return controlerSaisie(JSON.parse(e.parameter.p || "{}")); },
+    saisies: function () { return obtenirSaisies(e.parameter.module); },
+    saisieModifier: function () { return modifierSaisie(e.parameter.id, JSON.parse(e.parameter.p || "{}")); },
+    saisieSupprimer: function () { return supprimerSaisie(e.parameter.id); }
+  };
+  if (actionsSaisies[action]) {
+    var retS;
+    try { retS = actionsSaisies[action](); } catch (errS) { retS = { ok: false, error: errS.message, alertes: [], items: [] }; }
+    var jsonS = JSON.stringify(retS);
+    if (e.parameter.callback) {
+      return ContentService.createTextOutput(e.parameter.callback + "(" + jsonS + ")")
+        .setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    return ContentService.createTextOutput(jsonS).setMimeType(ContentService.MimeType.JSON);
+  }
+
   var actionsRecolte = {
     dernieresRecoltes: obtenirDernieresRecoltes,
     pointsRecolte: obtenirPointsRecolte,
     dernieresPesees: obtenirDernieresPesees,
     tableauPoids: obtenirTableauPoids,
     dernieresVentes: obtenirDernieresVentes,
-    tableauVente: obtenirTableauVente
+    tableauVente: obtenirTableauVente,
+    listesVente: obtenirListesVente,
+    urlFichier: function () { return { url: SpreadsheetApp.getActiveSpreadsheet().getUrl() }; }
   };
   if (actionsRecolte[action]) {
     var json5 = JSON.stringify(actionsRecolte[action]());
@@ -189,8 +209,25 @@ var LABELS_LIGNE = {
   "Bousquet et Riou": { 1: "Bousquet", 2: "Riou" }
 };
 
+// Ligne d'en-tête « Mois » du tableau de bilan d'un bloc : d'abord AU-DESSUS des données (tableaux
+// en haut de l'onglet), sinon en dessous (ancienne disposition). -1 si introuvable.
+function trouverEnteteBilan(sheet, block) {
+  var col = block.blockCol;
+  var max = Math.min(sheet.getMaxRows(), block.headerRow + 120);
+  var vals = sheet.getRange(1, col, max, 1).getValues();
+  var r;
+  for (r = 0; r < block.headerRow - 1; r++) {
+    if (normTxt(vals[r][0]) === "mois") return r + 1;
+  }
+  for (r = block.headerRow; r < max; r++) {
+    if (normTxt(vals[r][0]) === "mois") return r + 1;
+  }
+  return -1;
+}
+
 // Récupère, pour les 11 blocs, le tableau de bilan mensuel déjà calculé (formules déjà
 // en place dans le Sheet) : Mois | Pluie (mm) | Arrosage (mm) | cumul | Besoins (Etc).
+// Toutes les lignes du tableau sont lues (mai à avril + la ligne TOTAL période estivale).
 function obtenirTousLesBilans() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var out = [];
@@ -203,24 +240,25 @@ function obtenirTousLesBilans() {
       var block = findLigneBlock(sheet, ligneIndex);
       if (!block) return;
 
-      var colMois = block.blockCol;
-      var headerRow2 = -1;
-      for (var r = block.headerRow; r < block.headerRow + 90; r++) {
-        var v = sheet.getRange(r, colMois).getValue();
-        if (v && v.toString().trim().toLowerCase() === "mois") { headerRow2 = r; break; }
-      }
+      var headerRow2 = trouverEnteteBilan(sheet, block);
       if (headerRow2 === -1) return;
 
-      var rows = sheet.getRange(headerRow2 + 1, colMois, 6, 5).getValues(); // 5 mois + TOTAL
-      var mois = rows.map(function (row) {
-        return {
-          mois: row[0] ? row[0].toString() : "",
+      var nb = Math.min(16, sheet.getMaxRows() - headerRow2);
+      var rows = sheet.getRange(headerRow2 + 1, block.blockCol, nb, 5).getValues();
+      var mois = [];
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var label = row[0] ? row[0].toString().trim() : "";
+        if (!label) break; // fin du tableau
+        mois.push({
+          mois: label,
+          total: /^total/i.test(label),
           pluie: Number(row[1]) || 0,
           arrosage: Number(row[2]) || 0,
           cumul: Number(row[3]) || 0,
           besoins: Number(row[4]) || 0
-        };
-      });
+        });
+      }
 
       var labels = LABELS_LIGNE[p.sheet] || {};
       out.push({
@@ -255,26 +293,9 @@ function handleArrosage(data) {
   }
 
   var cols = blockColumns(block.blockCol);
-  var dateValue = data.date ? parseDateOnly(data.date) : "";
-  var targetRow = resolveTargetRow(sheet, block, cols, dateValue);
+  var targetRow = ecrireArrosage(sheet, block, cols, data);
   if (targetRow === -1) {
     return jsonOutput({ ok: false, error: "Plus de ligne libre dans le tableau — il faut l'étendre manuellement." });
-  }
-
-  setValueColored(sheet.getRange(targetRow, cols.date), dateValue, COULEUR_ARROSAGE).setNumberFormat(FORMAT_DATE);
-  setValueColored(sheet.getRange(targetRow, cols.duree), Number(data.duree), COULEUR_ARROSAGE);
-  setValueColored(sheet.getRange(targetRow, cols.debut), Number(data.compteur_debut), COULEUR_ARROSAGE);
-  setValueColored(sheet.getRange(targetRow, cols.fin), Number(data.compteur_fin), COULEUR_ARROSAGE);
-  setValueColored(sheet.getRange(targetRow, cols.m3), Number(data.m3), COULEUR_ARROSAGE);
-
-  // Heure début / Heure fin sont facultatives : rien n'est écrit si elles sont vides.
-  if (data.heure_debut) {
-    var hd = sheet.getRange(targetRow, cols.heureDebut);
-    hd.setValue(parseHeure(data.heure_debut)).setNumberFormat("HH:mm").setFontColor(COULEUR_ARROSAGE);
-  }
-  if (data.heure_fin) {
-    var hf = sheet.getRange(targetRow, cols.heureFin);
-    hf.setValue(parseHeure(data.heure_fin)).setNumberFormat("HH:mm").setFontColor(COULEUR_ARROSAGE);
   }
 
   return jsonOutput({ ok: true, row: targetRow });
@@ -287,29 +308,15 @@ function handlePluie(data) {
   if (!data.date || isNaN(mm)) {
     return jsonOutput({ ok: false, error: "Date ou mm manquant pour la pluie." });
   }
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var dateValue = parseDateOnly(data.date);
-  var details = [];
-
-  PARCELLES.forEach(function (p) {
-    var sheet = ss.getSheetByName(p.sheet);
-    if (!sheet) { details.push(p.sheet + " : onglet introuvable"); return; }
-
-    p.lignes.forEach(function (ligneIndex) {
-      var block = findLigneBlock(sheet, ligneIndex);
-      if (!block) { details.push(p.sheet + " Ligne " + ligneIndex + " : bloc introuvable"); return; }
-
-      var cols = blockColumns(block.blockCol);
-      var targetRow = resolveTargetRow(sheet, block, cols, dateValue);
-      if (targetRow === -1) { details.push(p.sheet + " Ligne " + ligneIndex + " : plus de ligne libre"); return; }
-
-      setValueColored(sheet.getRange(targetRow, cols.date), dateValue, COULEUR_PLUIE).setNumberFormat(FORMAT_DATE);
-      setValueColored(sheet.getRange(targetRow, cols.pluie), mm, COULEUR_PLUIE);
-      details.push(p.sheet + " Ligne " + ligneIndex + " : ligne " + targetRow + " OK");
-    });
+  return avecVerrou(function () {
+    // « Remplacer » (choisi dans l'écran de vérification) : la pluie déjà saisie ce jour-là est retirée d'abord.
+    if (data.remplacer) {
+      var n = retirerToutePluieDate(data.date);
+      if (n) journaliser("Remplacement", "Pluie", { date: data.date, lignes: n }, { date: data.date, mm: mm }, "");
+    }
+    var details = ecrirePluie(parseDateOnly(data.date), mm);
+    return jsonOutput({ ok: true, details: details });
   });
-
-  return jsonOutput({ ok: true, details: details });
 }
 
 /* ================================================================
@@ -323,9 +330,11 @@ function handleHeures(data) {
   if (!data.date || !data.nom || !data.lieu || !data.tache || data.duree === undefined || data.duree === "") {
     return jsonOutput({ ok: false, error: "Champs manquants pour la saisie heures." });
   }
-  if (HEURES_PERSONNES.indexOf(data.nom) === -1) {
+  var nomCanon = personneCanonique(data.nom);
+  if (!nomCanon) {
     return jsonOutput({ ok: false, error: "Personne inconnue : " + data.nom });
   }
+  data.nom = nomCanon;
 
   var dateValue = parseDateOnly(data.date);
   var duree = Number(data.duree);
@@ -333,25 +342,14 @@ function handleHeures(data) {
     return jsonOutput({ ok: false, error: "Durée invalide." });
   }
 
-  // Si "lieu" ou "tache" est une valeur inédite (saisie via "Autre"), on l'ajoute à la liste
-  // de référence correspondante (et donc aux lignes du tableau récapitulatif concerné).
-  // "nom" est toujours l'un des 6 emplacements fixes (Paul/René/Charles/Externe 1/2/3) —
-  // pas de liste à étendre pour ce champ.
-  ajouterSiNouveau(sheet, HEURES_LIEU_LIST_COL, HEURES_LIEU_LIST_START, data.lieu, HEURES_LIEU_RECAP_WIDTH);
-  ajouterSiNouveau(sheet, HEURES_TACHE_LIST_COL, HEURES_TACHE_LIST_START, data.tache, HEURES_TACHE_RECAP_WIDTH);
-
-  var targetRow = resolveTargetRowHeures(sheet, dateValue);
+  // Lieu et tâche : l'orthographe de la liste existante est reprise (majuscules, espaces) pour ne
+  // pas créer de doublons du type « Baume » / « baume » / « Baume ».
+  var listesH = obtenirListesHeures();
+  var lieuC = canonDans(listesH.lieux, data.lieu), tacheC = canonDans(listesH.taches, data.tache);
+  var targetRow = ecrireHeures(sheet, dateValue, data.nom, lieuC, tacheC, duree);
   if (targetRow === -1) {
     return jsonOutput({ ok: false, error: "Plus de ligne libre dans le tableau des heures — il faut l'étendre manuellement." });
   }
-
-  var dateCell = sheet.getRange(targetRow, HEURES_COL_DATE);
-  dateCell.setValue(dateValue).setNumberFormat(FORMAT_DATE);
-  sheet.getRange(targetRow, HEURES_COL_PERSONNE).setValue(data.nom);
-  sheet.getRange(targetRow, HEURES_COL_LIEU).setValue(data.lieu);
-  sheet.getRange(targetRow, HEURES_COL_TACHE).setValue(data.tache);
-  sheet.getRange(targetRow, HEURES_COL_TEMPS).setValue(duree);
-  sheet.getRange(targetRow, HEURES_COL_HORODATAGE).setValue(new Date()).setNumberFormat("dd/mm/yyyy hh:mm:ss");
 
   return jsonOutput({ ok: true, row: targetRow });
 }
@@ -537,7 +535,7 @@ var RECOLTE_COL_LAT = 9;      // I
 var RECOLTE_COL_LON = 10;     // J
 var RECOLTE_NB_COLS = 10;     // A à J (pour le décalage chronologique)
 var RECOLTE_PARCELLES = ["La Fontaine", "La Baume", "Bousquet", "Riou", "Les Pilles"];
-var RECOLTE_POIDS = ["<10 g", "20 g", "50 g", "100 g", ">100 g"];
+var RECOLTE_POIDS = ["<10 g", "20 g", "50 g", "100 g", ">100 g", "Brumale"];
 var VOLUME_SHEET = "Récolte volume";
 
 function normTxt(t) {
@@ -610,7 +608,7 @@ function handleRecolte(data) {
   sheet.getRange(r, RECOLTE_COL_DATE).setValue(dateValue).setNumberFormat(FORMAT_DATE);
   sheet.getRange(r, RECOLTE_COL_PARCELLE).setValue(data.parcelle);
   sheet.getRange(r, RECOLTE_COL_POIDS).setNumberFormat("@").setValue(data.poids); // texte (« <10 g »)
-  sheet.getRange(r, RECOLTE_COL_COMMENT).setValue((data.commentaire || "").toString().trim());
+  sheet.getRange(r, RECOLTE_COL_COMMENT).setValue(commentaireAvecBrumale(data.poids, data.commentaire));
 
   var lat = Number(data.lat), lon = Number(data.lon);
   var cellLoc = sheet.getRange(r, RECOLTE_COL_LOC);
@@ -635,7 +633,42 @@ function handleRecolte(data) {
     sheet.getRange(2, RECOLTE_COL_LON).setValue("Longitude");
   }
 
+  try { assurerCouleurBrumale(sheet); } catch (e) {}
+
   return jsonOutput({ ok: true, row: r, no: maxNo + 1 });
+}
+
+// Les lignes « Brumale » du tableau « Récolte pointage » ressortent en rose vif (mise en forme
+// conditionnelle sur la colonne Poids : suit les lignes quand elles sont décalées). Idempotent.
+function assurerCouleurBrumale(sheet) {
+  // Rose vif si le type est « Brumale » OU si « brumale » figure dans le commentaire (anciennes saisies).
+  var formule = '=OR($' + String.fromCharCode(64 + RECOLTE_COL_POIDS) + RECOLTE_DATA_START_ROW + '="Brumale",ISNUMBER(SEARCH("brumale",$' +
+    String.fromCharCode(64 + RECOLTE_COL_COMMENT) + RECOLTE_DATA_START_ROW + ')))';
+  var rules = sheet.getConditionalFormatRules(), gardees = [];
+  for (var i = 0; i < rules.length; i++) {
+    var bc = rules[i].getBooleanCondition && rules[i].getBooleanCondition();
+    var v = bc && bc.getCriteriaValues ? bc.getCriteriaValues() : [];
+    var txt = v.length ? String(v[0]) : "";
+    if (/brumale/i.test(txt)) {
+      if (/SEARCH|CHERCHE/i.test(txt)) return; // déjà à jour
+      continue; // ancienne règle (type seul) : remplacée
+    }
+    gardees.push(rules[i]);
+  }
+  var plage = sheet.getRange(RECOLTE_DATA_START_ROW, 1, Math.max(1, sheet.getMaxRows() - RECOLTE_DATA_START_ROW + 1), RECOLTE_NB_COLS);
+  var regle = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(formule).setBackground("#FF00A8").setFontColor("#FFFFFF").setBold(true)
+    .setRanges([plage]).build();
+  gardees.push(regle);
+  sheet.setConditionalFormatRules(gardees);
+}
+
+// À lancer une fois pour colorer les Brumale déjà saisies.
+function colorerBrumale() {
+  var sheet = ongletPointage(SpreadsheetApp.getActiveSpreadsheet());
+  if (!sheet) return "Onglet 'Récolte pointage' introuvable.";
+  assurerCouleurBrumale(sheet);
+  return "OK : les lignes Brumale sont en rose vif.";
 }
 
 // Pour l'écran de contrôle : nombre total de truffes + les 5 dernières lignes du tableau
@@ -1168,13 +1201,14 @@ function analyserOngletVente(sheet) {
     dernierQ = Math.max(dernierQ, pc + 1);
   }
 
-  var colEuros = 0, colMoy = 0, colG = 0;
+  var colEuros = 0, colMoy = 0, colG = 0, clientCol = 0, listCol = 0;
   for (c = dernierQ; c < lastCol; c++) {
     var label = "";
     for (r = 0; r < headerRow; r++) label += " " + txt(r, c);
     label = label.trim();
     if (!label) continue;
-    if (/moyen/.test(label)) { if (!colMoy) colMoy = c + 1; }
+    if (/client/.test(label)) { if (/liste/.test(label)) { if (!listCol) listCol = c + 1; } else if (!clientCol) clientCol = c + 1; }
+    else if (/moyen/.test(label)) { if (!colMoy) colMoy = c + 1; }
     else if (/total/.test(label) && /vente|€|eur/.test(label)) { if (!colEuros) colEuros = c + 1; }
     else if (/total/.test(label) && /\bg\b|poids|vendu/.test(label)) { if (!colG) colG = c + 1; }
   }
@@ -1192,8 +1226,8 @@ function analyserOngletVente(sheet) {
 
   return {
     dateCol: 1, groupRow: groupRow, headerRow: headerRow, startRow: headerRow + 1, totalsRow: totalsRow,
-    cols: cols, colEuros: colEuros, colMoy: colMoy, colG: colG,
-    dernierCol: Math.max(colEuros, colMoy, colG, dernierQ)
+    cols: cols, colEuros: colEuros, colMoy: colMoy, colG: colG, clientCol: clientCol, listCol: listCol,
+    dernierCol: Math.max(colEuros, colMoy, colG, dernierQ, clientCol)
   };
 }
 
@@ -1217,6 +1251,65 @@ function infosOngletVente(creer) {
   info.sheet = sheet;
   info.tz = ss.getSpreadsheetTimeZone();
   return info;
+}
+
+// Clients : colonne « Client » (à droite de « Total poids vendu ») et liste des noms proposés dans
+// l'appli (colonne « Liste clients », éditable à la main : une ligne = un nom). Créées si absentes.
+var CLIENTS_PAR_DEFAUT = ["Particulier", "Restaurateur", "Grossiste", "Marché", "Autre professionnel"];
+
+function lireListeClients(info) {
+  if (!info.listCol) return [];
+  var n = Math.max(1, Math.min(300, info.sheet.getMaxRows() - info.startRow + 1));
+  var v = info.sheet.getRange(info.startRow, info.listCol, n, 1).getValues(), out = [];
+  for (var i = 0; i < v.length; i++) { var t = (v[i][0] || "").toString().trim(); if (t) out.push(t); }
+  return out;
+}
+
+function assurerColonnesClient(info) {
+  var sheet = info.sheet, modifie = false;
+  function colLibre(depuis) {
+    var col = depuis;
+    while ((sheet.getRange(info.headerRow, col).getValue() || "") !== "") col++;
+    return col;
+  }
+  if (!info.clientCol) {
+    var cc = colLibre(Math.max(info.colEuros, info.colMoy, info.colG) + 1);
+    sheet.getRange(info.headerRow, cc).setValue("Client").setFontWeight("bold");
+    info.clientCol = cc; modifie = true;
+  }
+  if (!info.listCol) {
+    var lc = colLibre(info.clientCol + 2);
+    sheet.getRange(info.headerRow, lc).setValue("Liste clients").setFontWeight("bold");
+    info.listCol = lc; modifie = true;
+  }
+  if (!lireListeClients({ sheet: sheet, startRow: info.startRow, listCol: info.listCol }).length) {
+    sheet.getRange(info.startRow, info.listCol, CLIENTS_PAR_DEFAUT.length, 1)
+      .setValues(CLIENTS_PAR_DEFAUT.map(function (x) { return [x]; }));
+  }
+  if (!modifie) return info;
+  var neuf = analyserOngletVente(sheet);
+  if (neuf.error) return neuf;
+  neuf.sheet = sheet; neuf.tz = info.tz;
+  return neuf;
+}
+
+function ajouterClientSiNouveau(info, nom) {
+  if (!nom) return;
+  var liste = lireListeClients(info), k = normTxt(nom);
+  for (var i = 0; i < liste.length; i++) if (normTxt(liste[i]) === k) return;
+  var n = Math.max(1, Math.min(300, info.sheet.getMaxRows() - info.startRow + 1));
+  var v = info.sheet.getRange(info.startRow, info.listCol, n, 1).getValues();
+  for (var j = 0; j < v.length; j++) {
+    if (!(v[j][0] || "").toString().trim()) { info.sheet.getRange(info.startRow + j, info.listCol).setValue(nom); return; }
+  }
+}
+
+function obtenirListesVente() {
+  var info = infosOngletVente(true);
+  if (info.error) return { clients: CLIENTS_PAR_DEFAUT.slice() };
+  info = assurerColonnesClient(info);
+  if (info.error) return { clients: CLIENTS_PAR_DEFAUT.slice() };
+  return { clients: lireListeClients(info) };
 }
 
 // Formules attendues pour une ligne de date : total € = Σ prix × poids / 1000 ; moyenne €/kg ; total g
@@ -1262,12 +1355,13 @@ function assurerTotauxVente(info) {
   }
   QUALITES_VENTE.forEach(function (q) {
     var P = columnToLetter(info.cols[q.key].prix), W = columnToLetter(info.cols[q.key].poids);
-    poser(info.cols[q.key].prix, "=IFERROR(AVERAGE(" + P + start + ":" + P + ");\"\")");
+    // moyenne PONDÉRÉE par les poids (et non moyenne simple des prix de chaque ligne)
+    poser(info.cols[q.key].prix, "=IFERROR(SUMPRODUCT(" + P + start + ":" + P + ";" + W + start + ":" + W + ")/SUM(" + W + start + ":" + W + ");\"\")");
     poser(info.cols[q.key].poids, "=SUM(" + W + start + ":" + W + ")");
   });
   var LE = columnToLetter(info.colEuros), LM = columnToLetter(info.colMoy), LG = columnToLetter(info.colG);
   poser(info.colEuros, "=SUM(" + LE + start + ":" + LE + ")");
-  poser(info.colMoy, "=IFERROR(AVERAGE(" + LM + start + ":" + LM + ");\"\")");
+  poser(info.colMoy, "=IFERROR(" + LE + tr + "/(" + LG + tr + "/1000);\"\")");
   poser(info.colG, "=SUM(" + LG + start + ":" + LG + ")");
 }
 
@@ -1275,6 +1369,9 @@ function assurerTotauxVente(info) {
 function handleVente(data) {
   var info = infosOngletVente(true);
   if (info.error) return jsonOutput({ ok: false, error: info.error });
+  info = assurerColonnesClient(info);
+  if (info.error) return jsonOutput({ ok: false, error: info.error });
+  var client = canonDans(info.listCol ? lireListeClients(info) : [], data.client);
   if (!data.date) return jsonOutput({ ok: false, error: "Date manquante." });
   var lignes = data.lignes || [];
   if (!lignes.length) return jsonOutput({ ok: false, error: "Aucune qualité renseignée." });
@@ -1297,7 +1394,8 @@ function handleVente(data) {
     if (d === "" || d === null) { nextFree = start + i; break; }
     if (d instanceof Date) {
       var j = jourStr(d, tz);
-      if (j === jour && rowSame === -1) rowSame = start + i;
+      // une ligne par DATE et par CLIENT : même jour mais autre client = nouvelle ligne
+      if (j === jour && rowSame === -1 && normTxt(bloc[i][info.clientCol - 1]) === normTxt(client)) rowSame = start + i;
       if (j > jour && insertion === -1) insertion = start + i;
     }
   }
@@ -1312,7 +1410,9 @@ function handleVente(data) {
     target = insertion !== -1 ? insertion : nextFree;
     if (insertion !== -1) shiftBlockRowsDown(sheet, 1, info.dernierCol, insertion, nextFree);
     sheet.getRange(target, 1).setValue(parseDateOnly(data.date)).setNumberFormat(FORMAT_DATE);
+    if (client) sheet.getRange(target, info.clientCol).setValue(client);
   }
+  ajouterClientSiNouveau(info, client);
 
   propres.forEach(function (p) {
     var cp = sheet.getRange(target, info.cols[p.key].prix), cw = sheet.getRange(target, info.cols[p.key].poids);
@@ -1343,7 +1443,7 @@ function lireTableauVente(info) {
   for (var i = 0; i < vals.length; i++) {
     var d = vals[i][0];
     if (d === "" || d === null) break;
-    var ligne = { date: d instanceof Date ? formatDateFR(d) : d, q: {}, euros: 0, moyenne: null, g: 0 };
+    var ligne = { date: d instanceof Date ? formatDateFR(d) : d, client: info.clientCol ? (vals[i][info.clientCol - 1] || "").toString() : "", q: {}, euros: 0, moyenne: null, g: 0 };
     var eurosCalc = 0, gCalc = 0;
     QUALITES_VENTE.forEach(function (q) {
       var p = Number(vals[i][info.cols[q.key].prix - 1]), w = Number(vals[i][info.cols[q.key].poids - 1]);
@@ -1403,6 +1503,7 @@ function verifierOngletVente() {
     QUALITES_VENTE.forEach(function (q) {
       lignes.push(q.label + " : prix/kg=" + columnToLetter(info.cols[q.key].prix) + " · poids=" + columnToLetter(info.cols[q.key].poids));
     });
+    lignes.push("Client : " + (info.clientCol ? "colonne " + columnToLetter(info.clientCol) : "(sera créée à la première vente)") + " · liste des clients : " + (info.listCol ? "colonne " + columnToLetter(info.listCol) : "(sera créée)"));
     lignes.push("Total vente € : " + columnToLetter(info.colEuros) + " · prix moyen : " + columnToLetter(info.colMoy) + " · total poids : " + columnToLetter(info.colG));
   }
   Logger.log(lignes.join("\n"));
@@ -1710,223 +1811,6 @@ function importPluieMeteocielAout2026() {
   return results;
 }
 
-/* ---------- Reproduction du bilan mensuel (Pluie/Arrosage/cumul/Besoins) sous chaque ligne ---------- */
-// À exécuter une seule fois. Reproduit sous les 10 blocs restants (tous sauf La Fontaine
-// Ligne 1, qui contient déjà le modèle d'origine construit à la main) le même tableau :
-// Mois | Pluie (mm) | Arrosage (mm) | cumul pluie+arrosage | Besoins de plante Etc (mm).
-// Pluie (mm) et Arrosage (mm) sont des SUMIFS calculés sur les colonnes Date/Pluie(mm)/mm
-// du bloc concerné, pour chaque mois de mai à septembre 2026. Le fond des colonnes
-// Pluie (mm) et Arrosage (mm) reprend la couleur de la ligne (orange clair Ligne 1,
-// bleu clair Ligne 2, vert clair Ligne 3). Les besoins (Etc) sont les mêmes 5 valeurs pour
-// toutes les parcelles/lignes, comme dans le modèle d'origine.
-function ajouterBilanMensuel() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var results = [];
-
-  var mois = [
-    { nom: "Mai", num: 5, besoin: 59 },
-    { nom: "Juin", num: 6, besoin: 78 },
-    { nom: "Juillet", num: 7, besoin: 94 },
-    { nom: "Août", num: 8, besoin: 85 },
-    { nom: "Septembre", num: 9, besoin: 55 }
-  ];
-
-  var COULEURS_LIGNE = { 1: "#FCE5CD", 2: "#CFE2F3", 3: "#D9EAD3" };
-  var COULEUR_HEADER_BG = "#073763";
-  var COULEUR_HEADER_TXT = "#FFFFFF";
-
-  PARCELLES.forEach(function (p) {
-    var sheet = ss.getSheetByName(p.sheet);
-    if (!sheet) { results.push(p.sheet + " : onglet introuvable"); return; }
-
-    p.lignes.forEach(function (ligneIndex) {
-      if (p.sheet === "La Fontaine" && ligneIndex === 1) {
-        results.push(p.sheet + " Ligne 1 : déjà existant (modèle d'origine), ignoré.");
-        return;
-      }
-
-      var block = findLigneBlock(sheet, ligneIndex);
-      if (!block) { results.push(p.sheet + " Ligne " + ligneIndex + " : bloc introuvable"); return; }
-
-      var cols = blockColumns(block.blockCol);
-      var colMois = block.blockCol;         // même colonne que "Date"
-      var colPluieBilan = block.blockCol + 1;
-      var colArrosageBilan = block.blockCol + 2;
-      var colCumul = block.blockCol + 3;
-      var colBesoins = block.blockCol + 4;
-
-      // Cherche une zone de 7 lignes x 5 colonnes libre, en partant d'un point de départ
-      // estimé (même écart que le modèle d'origine), et en descendant si besoin.
-      var startRow = block.headerRow + 38;
-      var found = false;
-      for (var t = 0; t < 30; t++) {
-        var libre = true;
-        for (var rr = startRow; rr < startRow + 7 && libre; rr++) {
-          var rowVals = sheet.getRange(rr, colMois, 1, 5).getValues()[0];
-          for (var cc = 0; cc < rowVals.length; cc++) {
-            if (rowVals[cc] !== "" && rowVals[cc] !== null) { libre = false; break; }
-          }
-        }
-        if (libre) { found = true; break; }
-        startRow += 1;
-      }
-      if (!found) {
-        results.push(p.sheet + " Ligne " + ligneIndex + " : aucune zone libre trouvée, tableau NON ajouté.");
-        return;
-      }
-
-      var headerRow2 = startRow;
-      var headers = ["Mois", "Pluie (mm)", "Arrosage (mm)", "cumul pluie+arrosage", "Besoins de plante, sans pluie Etc (mm) = Kc x ETP"];
-      var headerRange = sheet.getRange(headerRow2, colMois, 1, 5);
-      headerRange.setValues([headers]);
-      headerRange.setBackground(COULEUR_HEADER_BG).setFontColor(COULEUR_HEADER_TXT).setFontWeight("bold");
-
-      var couleurLigne = COULEURS_LIGNE[ligneIndex] || "#FFFFFF";
-      var colDateLettre = columnToLetter(cols.date);
-      var colPluieLettre = columnToLetter(cols.pluie);
-      var colMmLettre = columnToLetter(cols.mm);
-      var plageDebut = block.dataStartRow;
-      var plageFin = block.dataStartRow + 300; // fenêtre large mais bornée (évite les colonnes entières)
-      var dateRange = colDateLettre + plageDebut + ":" + colDateLettre + plageFin;
-      var pluieRange = colPluieLettre + plageDebut + ":" + colPluieLettre + plageFin;
-      var mmRange = colMmLettre + plageDebut + ":" + colMmLettre + plageFin;
-
-      mois.forEach(function (m, idx) {
-        var r = headerRow2 + 1 + idx;
-        // Point-virgule comme séparateur d'arguments : ce classeur est en locale française,
-        // où Sheets attend ";" entre les arguments d'une fonction (la virgule sert de
-        // séparateur décimal). Une formule construite avec des virgules provoque une
-        // "Erreur d'analyse de formule".
-        var debut = "DATE(2026;" + m.num + ";1)";
-        var finExclusive = "DATE(2026;" + (m.num + 1) + ";1)"; // 1er du mois suivant (borne exclusive)
-
-        sheet.getRange(r, colMois).setValue(m.nom);
-
-        // SUMPRODUCT + IFERROR : ignore les cellules en erreur (ex. #REF! isolés plus loin
-        // dans le tableau) au lieu de faire planter tout le calcul, contrairement à SUMIFS
-        // sur une plage contenant ne serait-ce qu'une seule cellule en erreur.
-        // IFERROR englobe ici TOUTE l'opération (comparaisons de dates ET valeur à sommer),
-        // pas seulement la lecture des plages : ça protège aussi contre une comparaison
-        // texte/date invalide (ex. la cellule "TOTAL Juin" mélangée aux vraies dates), qui
-        // provoquerait sinon une #ERROR! non capturée par un IFERROR posé uniquement sur la plage.
-        // La borne haute est exclusive (< 1er du mois suivant) plutôt que <= dernier jour, pour
-        // rester correct même si une saisie du dernier jour du mois garde une heure résiduelle.
-        var pluieCell = sheet.getRange(r, colPluieBilan);
-        pluieCell.setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + pluieRange + ";0))");
-        pluieCell.setBackground(couleurLigne);
-
-        var arrosageCell = sheet.getRange(r, colArrosageBilan);
-        arrosageCell.setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + mmRange + ";0))");
-        arrosageCell.setBackground(couleurLigne);
-
-        var cumulCell = sheet.getRange(r, colCumul);
-        cumulCell.setFormula("=" + columnToLetter(colPluieBilan) + r + "+" + columnToLetter(colArrosageBilan) + r);
-
-        sheet.getRange(r, colBesoins).setValue(m.besoin);
-      });
-
-      var totalRow = headerRow2 + 1 + mois.length;
-      var firstDataRow2 = headerRow2 + 1;
-      var lastDataRow2 = headerRow2 + mois.length;
-
-      sheet.getRange(totalRow, colMois).setValue("TOTAL").setFontWeight("bold");
-      sheet.getRange(totalRow, colPluieBilan).setFormula("=SUM(" + columnToLetter(colPluieBilan) + firstDataRow2 + ":" + columnToLetter(colPluieBilan) + lastDataRow2 + ")").setFontWeight("bold");
-      sheet.getRange(totalRow, colArrosageBilan).setFormula("=SUM(" + columnToLetter(colArrosageBilan) + firstDataRow2 + ":" + columnToLetter(colArrosageBilan) + lastDataRow2 + ")").setFontWeight("bold");
-      sheet.getRange(totalRow, colCumul).setFormula("=SUM(" + columnToLetter(colCumul) + firstDataRow2 + ":" + columnToLetter(colCumul) + lastDataRow2 + ")").setFontWeight("bold");
-      sheet.getRange(totalRow, colBesoins).setFormula("=SUM(" + columnToLetter(colBesoins) + firstDataRow2 + ":" + columnToLetter(colBesoins) + lastDataRow2 + ")").setFontWeight("bold");
-
-      results.push(p.sheet + " Ligne " + ligneIndex + " : tableau ajouté à partir de la ligne " + headerRow2 + ".");
-    });
-  });
-
-  Logger.log(results.join("\n"));
-  return results;
-}
-
-/* ---------- Correction ponctuelle : formules du bilan mensuel déjà créé ---------- */
-// À exécuter si "ajouterBilanMensuel" a déjà été lancée et que les cellules Pluie (mm) /
-// Arrosage (mm) affichent une erreur de calcul. Repère chaque tableau déjà en place
-// (recherche du mot "Mois" dans la bonne colonne) et remplace uniquement les formules
-// Pluie/Arrosage/TOTAL par une version insensible aux erreurs isolées (IFERROR).
-// Ne touche ni aux en-têtes, ni aux couleurs, ni aux valeurs "Besoins" déjà en place.
-function corrigerFormulesBilanMensuel() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var results = [];
-
-  var mois = [
-    { nom: "Mai", num: 5 },
-    { nom: "Juin", num: 6 },
-    { nom: "Juillet", num: 7 },
-    { nom: "Août", num: 8 },
-    { nom: "Septembre", num: 9 }
-  ];
-
-  PARCELLES.forEach(function (p) {
-    var sheet = ss.getSheetByName(p.sheet);
-    if (!sheet) { results.push(p.sheet + " : onglet introuvable"); return; }
-
-    p.lignes.forEach(function (ligneIndex) {
-      if (p.sheet === "La Fontaine" && ligneIndex === 1) {
-        results.push(p.sheet + " Ligne 1 : modèle d'origine, ignoré.");
-        return;
-      }
-
-      var block = findLigneBlock(sheet, ligneIndex);
-      if (!block) { results.push(p.sheet + " Ligne " + ligneIndex + " : bloc introuvable"); return; }
-
-      var cols = blockColumns(block.blockCol);
-      var colMois = block.blockCol;
-      var colPluieBilan = block.blockCol + 1;
-      var colArrosageBilan = block.blockCol + 2;
-      var colCumul = block.blockCol + 3;
-
-      // Retrouve la ligne d'en-tête du bilan déjà créé (recherche "Mois" à partir de la
-      // zone estimée par ajouterBilanMensuel, en descendant si besoin).
-      var headerRow2 = -1;
-      var scanFrom = block.headerRow + 30;
-      for (var r = scanFrom; r < scanFrom + 60; r++) {
-        var v = sheet.getRange(r, colMois).getValue();
-        if (v && v.toString().trim().toLowerCase() === "mois") { headerRow2 = r; break; }
-      }
-      if (headerRow2 === -1) {
-        results.push(p.sheet + " Ligne " + ligneIndex + " : tableau de bilan introuvable, rien à corriger.");
-        return;
-      }
-
-      var colDateLettre = columnToLetter(cols.date);
-      var colPluieLettre = columnToLetter(cols.pluie);
-      var colMmLettre = columnToLetter(cols.mm);
-      var plageDebut = block.dataStartRow;
-      var plageFin = block.dataStartRow + 300;
-      var dateRange = colDateLettre + plageDebut + ":" + colDateLettre + plageFin;
-      var pluieRange = colPluieLettre + plageDebut + ":" + colPluieLettre + plageFin;
-      var mmRange = colMmLettre + plageDebut + ":" + colMmLettre + plageFin;
-
-      mois.forEach(function (m, idx) {
-        var r = headerRow2 + 1 + idx;
-        var debut = "DATE(2026;" + m.num + ";1)";
-        var finExclusive = "DATE(2026;" + (m.num + 1) + ";1)"; // 1er du mois suivant (borne exclusive)
-
-        sheet.getRange(r, colPluieBilan).setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + pluieRange + ";0))");
-        sheet.getRange(r, colArrosageBilan).setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + mmRange + ";0))");
-        sheet.getRange(r, colCumul).setFormula("=" + columnToLetter(colPluieBilan) + r + "+" + columnToLetter(colArrosageBilan) + r);
-      });
-
-      var totalRow = headerRow2 + 1 + mois.length;
-      var firstDataRow2 = headerRow2 + 1;
-      var lastDataRow2 = headerRow2 + mois.length;
-      sheet.getRange(totalRow, colPluieBilan).setFormula("=SUM(" + columnToLetter(colPluieBilan) + firstDataRow2 + ":" + columnToLetter(colPluieBilan) + lastDataRow2 + ")");
-      sheet.getRange(totalRow, colArrosageBilan).setFormula("=SUM(" + columnToLetter(colArrosageBilan) + firstDataRow2 + ":" + columnToLetter(colArrosageBilan) + lastDataRow2 + ")");
-      sheet.getRange(totalRow, colCumul).setFormula("=SUM(" + columnToLetter(colCumul) + firstDataRow2 + ":" + columnToLetter(colCumul) + lastDataRow2 + ")");
-
-      results.push(p.sheet + " Ligne " + ligneIndex + " : formules corrigées (tableau trouvé à la ligne " + headerRow2 + ").");
-    });
-  });
-
-  Logger.log(results.join("\n"));
-  return results;
-}
-
 /* ---------- Correction ponctuelle : nettoyer les dates déjà écrites (heure résiduelle) ---------- */
 // À exécuter si des dates déjà saisies affichent une heure (ex. "03/05/2026 15:00:00").
 // Ne touche qu'aux cellules contenant une vraie date (jamais aux textes comme "TOTAL Juin") :
@@ -1972,226 +1856,184 @@ function normaliserDatesExistantes() {
   return results;
 }
 
-/* ---------- Mise en forme ponctuelle : arrondir l'affichage des données ---------- */
-// À exécuter une seule fois. Applique un format "0" (arrondi à l'entier, sans décimale
-// affichée) sur les colonnes de données de chaque bloc (Durée, Compteur début, Compteur
-// fin, Débit, M3, mm, Pluie) ainsi que sur les tableaux de bilan mensuel (Pluie/Arrosage/
-// cumul/Besoins), pour les 4 onglets. Ne touche ni aux dates, ni aux heures (qui gardent
-// leur propre format), ni aux paramètres de parcelle (Surface/Longueur/Vitesse), pour ne
-// pas perdre leur précision. Ceci change uniquement l'AFFICHAGE, pas les valeurs stockées
-// ni les formules — les calculs restent faits avec la pleine précision.
-function arrondirAffichageDonnees() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var results = [];
+/* ---------- Tableaux récapitulatifs (Mois | Pluie | Arrosage | cumul | Besoins) EN HAUT des onglets ---------- */
+// Disposition (identique dans les 4 onglets) : lignes 1 à 14 = un tableau par ligne d'arrosage, placé
+// juste au-dessus de ses données (mêmes colonnes que le bloc) :
+//   ligne 1 : en-têtes · lignes 2 à 6 : mai à septembre · ligne 7 : TOTAL période estivale ·
+//   lignes 8 à 14 : octobre à avril (saison suivante).
+// Chaque case est une formule qui additionne TOUTES les données du bloc (de la 1re saisie jusqu'en bas
+// de l'onglet, nouvelles saisies comprises) : pluie = colonne « Pluie (mm) », arrosage = colonne « mm ».
+var MOIS_BILAN = [
+  { nom: "Mai", num: 5, an: 2026 }, { nom: "Juin", num: 6, an: 2026 }, { nom: "Juillet", num: 7, an: 2026 },
+  { nom: "Août", num: 8, an: 2026 }, { nom: "Septembre", num: 9, an: 2026 },
+  { nom: "octobre", num: 10, an: 2026 }, { nom: "novembre", num: 11, an: 2026 }, { nom: "décembre", num: 12, an: 2026 },
+  { nom: "janvier", num: 1, an: 2027 }, { nom: "février", num: 2, an: 2027 }, { nom: "mars", num: 3, an: 2027 },
+  { nom: "avril", num: 4, an: 2027 }
+];
+var BESOINS_PAR_DEFAUT = [59, 78, 94, 85, 55]; // mai à septembre (Etc = Kc x ETP)
+var NB_LIGNES_RECAP = 15; // 14 lignes de tableau + 1 ligne vide avant le titre de la parcelle
+var COULEURS_LIGNE_RECAP = { 1: "#FCE5CD", 2: "#CFE2F3", 3: "#D9EAD3" };
 
-  PARCELLES.forEach(function (p) {
-    var sheet = ss.getSheetByName(p.sheet);
-    if (!sheet) { results.push(p.sheet + " : onglet introuvable"); return; }
-
-    p.lignes.forEach(function (ligneIndex) {
-      var block = findLigneBlock(sheet, ligneIndex);
-      if (!block) { results.push(p.sheet + " Ligne " + ligneIndex + " : bloc introuvable"); return; }
-
-      var cols = blockColumns(block.blockCol);
-      var plageFin = block.dataStartRow + 300;
-      var nbLignes = plageFin - block.dataStartRow + 1;
-
-      // Colonnes numériques du bloc principal (Date et Heures gardent leur propre format)
-      [cols.duree, cols.debut, cols.fin, cols.debit, cols.m3, cols.mm, cols.pluie].forEach(function (c) {
-        sheet.getRange(block.dataStartRow, c, nbLignes, 1).setNumberFormat("0");
-      });
-
-      // Tableau de bilan mensuel associé, si présent (repéré par le mot "Mois")
-      var colMois = block.blockCol;
-      for (var r = block.headerRow; r < block.headerRow + 90; r++) {
-        var v = sheet.getRange(r, colMois).getValue();
-        if (v && v.toString().trim().toLowerCase() === "mois") {
-          var colPluieBilan = block.blockCol + 1;
-          sheet.getRange(r + 1, colPluieBilan, 6, 4).setNumberFormat("0");
-          break;
-        }
-      }
-
-      results.push(p.sheet + " Ligne " + ligneIndex + " : affichage arrondi appliqué.");
-    });
-  });
-
-  Logger.log(results.join("\n"));
-  return results;
+// Cellule « Surface couverte (ha) » du bloc, en référence absolue (ex. $B$18), ou null.
+function cellSurfaceBloc(sheet, block) {
+  var n = Math.max(1, block.headerRow - 1);
+  var labels = sheet.getRange(1, 1, n, 1).getValues();
+  for (var r = 0; r < n; r++) {
+    if (/surface/i.test((labels[r][0] || "").toString())) {
+      var v = sheet.getRange(r + 1, block.blockCol).getValue();
+      if (typeof v === "number" && v > 0) return "$" + columnToLetter(block.blockCol) + "$" + (r + 1);
+    }
+  }
+  return null;
 }
 
-/* ---------- Remplacement ponctuel : bilan mensuel de La Fontaine Ligne 1 ---------- */
-// À exécuter une seule fois. Repère le tableau construit à la main sous La Fontaine
-// Ligne 1 (recherche du mot "Mois") et le remplace entièrement par la version générée
-// automatiquement (mêmes formules SUMPRODUCT+IFERROR, mêmes couleurs) que les 10 autres
-// blocs. Écrase tout ce qui se trouvait dans cette zone (en-têtes, valeurs, formules).
-function remplacerBilanFontaineLigne1() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var results = [];
-
-  var mois = [
-    { nom: "Mai", num: 5, besoin: 59 },
-    { nom: "Juin", num: 6, besoin: 78 },
-    { nom: "Juillet", num: 7, besoin: 94 },
-    { nom: "Août", num: 8, besoin: 85 },
-    { nom: "Septembre", num: 9, besoin: 55 }
-  ];
-  var COULEURS_LIGNE = { 1: "#FCE5CD", 2: "#CFE2F3", 3: "#D9EAD3" };
-  var COULEUR_HEADER_BG = "#073763";
-  var COULEUR_HEADER_TXT = "#FFFFFF";
-
-  var sheet = ss.getSheetByName("La Fontaine");
-  if (!sheet) { Logger.log("La Fontaine : onglet introuvable"); return; }
-
-  var ligneIndex = 1;
-  var block = findLigneBlock(sheet, ligneIndex);
-  if (!block) { Logger.log("La Fontaine Ligne 1 : bloc introuvable"); return; }
-
+// Dernière ligne contenant une donnée (date, m3 ou pluie) dans un bloc.
+function derniereLigneBloc(sheet, block) {
   var cols = blockColumns(block.blockCol);
-  var colMois = block.blockCol;
-  var colPluieBilan = block.blockCol + 1;
-  var colArrosageBilan = block.blockCol + 2;
-  var colCumul = block.blockCol + 3;
-  var colBesoins = block.blockCol + 4;
-
-  // Repère le tableau existant (recherche "Mois" à partir de la zone estimée)
-  var headerRow2 = -1;
-  var scanFrom = block.headerRow + 30;
-  for (var r = scanFrom; r < scanFrom + 60; r++) {
-    var v = sheet.getRange(r, colMois).getValue();
-    if (v && v.toString().trim().toLowerCase() === "mois") { headerRow2 = r; break; }
+  var n = Math.max(1, Math.min(1000, sheet.getMaxRows() - block.dataStartRow + 1));
+  var v = sheet.getRange(block.dataStartRow, cols.date, n, cols.pluie - cols.date + 1).getValues();
+  var last = block.dataStartRow - 1;
+  for (var i = 0; i < n; i++) {
+    for (var j = 0; j < v[i].length; j++) {
+      if (v[i][j] !== "" && v[i][j] !== null) { last = block.dataStartRow + i; break; }
+    }
   }
-  if (headerRow2 === -1) {
-    Logger.log("La Fontaine Ligne 1 : tableau existant introuvable, rien remplacé.");
-    return;
-  }
-
-  // Efface entièrement l'ancienne zone (valeurs + mise en forme) avant de reconstruire
-  var zone = sheet.getRange(headerRow2, colMois, 7, 5);
-  zone.clearContent();
-  zone.clearFormat();
-
-  var headerRange = sheet.getRange(headerRow2, colMois, 1, 5);
-  headerRange.setValues([["Mois", "Pluie (mm)", "Arrosage (mm)", "cumul pluie+arrosage", "Besoins de plante, sans pluie Etc (mm) = Kc x ETP"]]);
-  headerRange.setBackground(COULEUR_HEADER_BG).setFontColor(COULEUR_HEADER_TXT).setFontWeight("bold");
-
-  var couleurLigne = COULEURS_LIGNE[ligneIndex];
-  var colDateLettre = columnToLetter(cols.date);
-  var colPluieLettre = columnToLetter(cols.pluie);
-  var colMmLettre = columnToLetter(cols.mm);
-  var plageDebut = block.dataStartRow;
-  var plageFin = block.dataStartRow + 300;
-  var dateRange = colDateLettre + plageDebut + ":" + colDateLettre + plageFin;
-  var pluieRange = colPluieLettre + plageDebut + ":" + colPluieLettre + plageFin;
-  var mmRange = colMmLettre + plageDebut + ":" + colMmLettre + plageFin;
-
-  mois.forEach(function (m, idx) {
-    var r = headerRow2 + 1 + idx;
-    var debut = "DATE(2026;" + m.num + ";1)";
-    var finExclusive = "DATE(2026;" + (m.num + 1) + ";1)";
-
-    sheet.getRange(r, colMois).setValue(m.nom);
-
-    var pluieCell = sheet.getRange(r, colPluieBilan);
-    pluieCell.setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + pluieRange + ";0))");
-    pluieCell.setBackground(couleurLigne).setNumberFormat("0");
-
-    var arrosageCell = sheet.getRange(r, colArrosageBilan);
-    arrosageCell.setFormula("=SUMPRODUCT(IFERROR((" + dateRange + ">=" + debut + ")*(" + dateRange + "<" + finExclusive + ")*" + mmRange + ";0))");
-    arrosageCell.setBackground(couleurLigne).setNumberFormat("0");
-
-    var cumulCell = sheet.getRange(r, colCumul);
-    cumulCell.setFormula("=" + columnToLetter(colPluieBilan) + r + "+" + columnToLetter(colArrosageBilan) + r).setNumberFormat("0");
-
-    sheet.getRange(r, colBesoins).setValue(m.besoin).setNumberFormat("0");
-  });
-
-  var totalRow = headerRow2 + 1 + mois.length;
-  var firstDataRow2 = headerRow2 + 1;
-  var lastDataRow2 = headerRow2 + mois.length;
-
-  sheet.getRange(totalRow, colMois).setValue("TOTAL").setFontWeight("bold");
-  sheet.getRange(totalRow, colPluieBilan).setFormula("=SUM(" + columnToLetter(colPluieBilan) + firstDataRow2 + ":" + columnToLetter(colPluieBilan) + lastDataRow2 + ")").setFontWeight("bold").setNumberFormat("0");
-  sheet.getRange(totalRow, colArrosageBilan).setFormula("=SUM(" + columnToLetter(colArrosageBilan) + firstDataRow2 + ":" + columnToLetter(colArrosageBilan) + lastDataRow2 + ")").setFontWeight("bold").setNumberFormat("0");
-  sheet.getRange(totalRow, colCumul).setFormula("=SUM(" + columnToLetter(colCumul) + firstDataRow2 + ":" + columnToLetter(colCumul) + lastDataRow2 + ")").setFontWeight("bold").setNumberFormat("0");
-  sheet.getRange(totalRow, colBesoins).setFormula("=SUM(" + columnToLetter(colBesoins) + firstDataRow2 + ":" + columnToLetter(colBesoins) + lastDataRow2 + ")").setFontWeight("bold").setNumberFormat("0");
-
-  Logger.log("La Fontaine Ligne 1 : ancien tableau (ligne " + headerRow2 + ") remplacé par la version générée.");
+  return last;
 }
 
-/* ---------- Code couleur ponctuel : Cumul / Besoins des tableaux de bilan ---------- */
-// À exécuter une seule fois. Applique une mise en forme conditionnelle DYNAMIQUE (elle se
-// recalcule automatiquement si les données changent) sur les colonnes Cumul et Besoins de
-// chacun des 11 tableaux de bilan :
-//  - Vert  : cumul >= besoins
-//  - Jaune : cumul entre 80% et 100% du besoin (déficit de 0 à 20%)
-//  - Rouge : cumul < 80% du besoin (déficit de plus de 20%)
-function appliquerCodeCouleurBilan() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var results = [];
-  var VERT = "#B7E1CD", JAUNE = "#FCE8B2", ROUGE = "#F4C7C3";
+// Remet la formule de la colonne « mm » : mm = (M3 / surface) / 10, avec la surface lue dans la
+// cellule « Surface couverte (ha) » du bloc (plus de surface écrite en dur dans les formules).
+function reecrireFormulesMm(sheet, block) {
+  var surf = cellSurfaceBloc(sheet, block);
+  if (!surf) return "surface introuvable, formules mm inchangées";
+  var cols = blockColumns(block.blockCol);
+  var last = derniereLigneBloc(sheet, block);
+  if (last < block.dataStartRow) return "aucune donnée";
+  var I = columnToLetter(cols.m3), f = [];
+  for (var r = block.dataStartRow; r <= last; r++) f.push(["=(" + I + r + "/" + surf + ")/10"]);
+  sheet.getRange(block.dataStartRow, cols.mm, f.length, 1).setFormulas(f);
+  return f.length + " formule(s) mm";
+}
 
-  PARCELLES.forEach(function (p) {
-    var sheet = ss.getSheetByName(p.sheet);
-    if (!sheet) { results.push(p.sheet + " : onglet introuvable"); return; }
+// Écrit (ou réécrit) le tableau récapitulatif d'un bloc. besoins = 5 valeurs (mai à septembre).
+function ecrireRecapBloc(sheet, block, ligneIndex, besoins) {
+  var c0 = block.blockCol, ds = block.dataStartRow, cols = blockColumns(c0);
+  var L = columnToLetter;
+  var dateR = L(cols.date) + ds + ":" + L(cols.date);
+  var pluieR = L(cols.pluie) + ds + ":" + L(cols.pluie);
+  var mmR = L(cols.mm) + ds + ":" + L(cols.mm);
+  var tint = COULEURS_LIGNE_RECAP[ligneIndex] || "#F1EEE3";
 
-    p.lignes.forEach(function (ligneIndex) {
-      var block = findLigneBlock(sheet, ligneIndex);
-      if (!block) { results.push(p.sheet + " Ligne " + ligneIndex + " : bloc introuvable"); return; }
+  var head = sheet.getRange(1, c0, 1, 5);
+  head.setValues([["Mois", "Pluie (mm)", "Arrosage (mm)", "cumul pluie+arrosage", "Besoins de plante, sans pluie Etc (mm) = Kc x ETP"]]);
+  head.setBackground("#073763").setFontColor("#FFFFFF").setFontWeight("bold");
 
-      var colMois = block.blockCol;
-      var headerRow2 = -1;
-      for (var r = block.headerRow; r < block.headerRow + 90; r++) {
-        var v = sheet.getRange(r, colMois).getValue();
-        if (v && v.toString().trim().toLowerCase() === "mois") { headerRow2 = r; break; }
-      }
-      if (headerRow2 === -1) { results.push(p.sheet + " Ligne " + ligneIndex + " : tableau de bilan introuvable"); return; }
-
-      var colCumulBilan = block.blockCol + 3;
-      var colBesoinsBilan = block.blockCol + 4;
-      var firstDataRow2 = headerRow2 + 1;
-
-      var rangeCumul = sheet.getRange(firstDataRow2, colCumulBilan, 6, 1);   // colonne Cumul seule
-      var rangeBesoins = sheet.getRange(firstDataRow2, colBesoinsBilan, 6, 1); // colonne Besoins seule
-
-      // Retire TOUTE règle déjà posée touchant cette zone (peu importe sa largeur — ça
-      // couvre aussi bien les nouvelles règles à 1 colonne que les résidus d'une éventuelle
-      // ancienne tentative à 2 colonnes), pour ne jamais laisser une ancienne règle prioritaire
-      // masquer les nouvelles.
-      var rulesExistantes = sheet.getConditionalFormatRules();
-      var rulesConservees = rulesExistantes.filter(function (rule) {
-        return !rule.getRanges().some(function (rg) {
-          return rg.getRow() === firstDataRow2 &&
-                 (rg.getColumn() === colCumulBilan || rg.getColumn() === colBesoinsBilan);
-        });
-      });
-
-      // Références relatives simples (sans $) : la plage appliquée n'ayant qu'une seule
-      // colonne, la ligne s'ajuste automatiquement pour chaque cellule, comme un remplissage
-      // vers le bas classique.
-      var colCumulLettre = columnToLetter(colCumulBilan);
-      var colBesoinsLettre = columnToLetter(colBesoinsBilan);
-      var ref = firstDataRow2;
-
-      var formuleVert = "=" + colCumulLettre + ref + ">=" + colBesoinsLettre + ref;
-      var formuleJaune = "=AND(" + colCumulLettre + ref + "<" + colBesoinsLettre + ref + ";" + colCumulLettre + ref + ">=" + colBesoinsLettre + ref + "*0.8)";
-      var formuleRouge = "=" + colCumulLettre + ref + "<" + colBesoinsLettre + ref + "*0.8";
-
-      [rangeCumul, rangeBesoins].forEach(function (rng) {
-        var ruleVert = SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formuleVert).setBackground(VERT).setRanges([rng]).build();
-        var ruleJaune = SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formuleJaune).setBackground(JAUNE).setRanges([rng]).build();
-        var ruleRouge = SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formuleRouge).setBackground(ROUGE).setRanges([rng]).build();
-        rulesConservees.push(ruleVert, ruleJaune, ruleRouge);
-      });
-
-      sheet.setConditionalFormatRules(rulesConservees);
-
-      results.push(p.sheet + " Ligne " + ligneIndex + " : code couleur appliqué (lignes " + firstDataRow2 + " à " + (firstDataRow2 + 5) + ").");
-    });
+  MOIS_BILAN.forEach(function (m, i) {
+    var row = i < 5 ? 2 + i : 3 + i; // la ligne 7 est le total de la période estivale
+    var deb = "DATE(" + m.an + ";" + m.num + ";1)";
+    var fin = m.num === 12 ? "DATE(" + (m.an + 1) + ";1;1)" : "DATE(" + m.an + ";" + (m.num + 1) + ";1)";
+    var crit = dateR + ";\">=\"&" + deb + ";" + dateR + ";\"<\"&" + fin;
+    sheet.getRange(row, c0).setValue(m.nom).setFontWeight("normal").setBackground(null);
+    sheet.getRange(row, c0 + 1).setFormula("=SUMIFS(" + pluieR + ";" + crit + ")").setBackground(tint);
+    sheet.getRange(row, c0 + 2).setFormula("=SUMIFS(" + mmR + ";" + crit + ")").setBackground(tint);
+    sheet.getRange(row, c0 + 3).setFormula("=" + L(c0 + 1) + row + "+" + L(c0 + 2) + row);
+    if (i < 5) sheet.getRange(row, c0 + 4).setValue(besoins && besoins[i] !== "" && besoins[i] !== null ? besoins[i] : BESOINS_PAR_DEFAUT[i]);
+    sheet.getRange(row, c0 + 1, 1, 4).setNumberFormat("0");
   });
 
+  sheet.getRange(7, c0).setValue("TOTAL periode estivale").setFontWeight("bold");
+  for (var k = 1; k <= 4; k++) {
+    sheet.getRange(7, c0 + k).setFormula("=SUM(" + L(c0 + k) + "2:" + L(c0 + k) + "6)").setFontWeight("bold").setNumberFormat("0");
+  }
+
+  // Code couleur dynamique sur Cumul / Besoins (vert : besoin couvert ; jaune : déficit jusqu'à 20 % ;
+  // rouge : déficit de plus de 20 %). Les mois sans besoin renseigné ne sont pas colorés.
+  var cu = L(c0 + 3), be = L(c0 + 4);
+  var rng = sheet.getRange(2, c0 + 3, 13, 2);
+  var VERT = "#B7E1CD", JAUNE = "#FCE8B2", ROUGE = "#F4C7C3";
+  var regles = sheet.getConditionalFormatRules().filter(function (rule) {
+    return !rule.getRanges().some(function (rg) {
+      return rg.getRow() <= 14 && rg.getColumn() <= c0 + 4 && rg.getLastColumn() >= c0 + 3;
+    });
+  });
+  [["=AND($" + be + "2>0;$" + cu + "2>=$" + be + "2)", VERT],
+   ["=AND($" + be + "2>0;$" + cu + "2<$" + be + "2;$" + cu + "2>=$" + be + "2*0.8)", JAUNE],
+   ["=AND($" + be + "2>0;$" + cu + "2<$" + be + "2*0.8)", ROUGE]].forEach(function (x) {
+    regles.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(x[0]).setBackground(x[1]).setRanges([rng]).build());
+  });
+  sheet.setConditionalFormatRules(regles);
+}
+
+// À EXÉCUTER UNE SEULE FOIS (après avoir fait une copie du fichier : Fichier > Créer une copie).
+// - Onglets dont le tableau est encore sous les données (Bousquet et Riou, La baume, Pilles) : le
+//   tableau est supprimé du milieu des données (les saisies qui le suivaient remontent), puis 15 lignes
+//   sont insérées en haut et les tableaux récapitulatifs y sont reconstruits (mai à avril).
+// - La Fontaine (déjà remontée par tes soins) : les formules sont réécrites sur le même modèle.
+// Dans tous les cas : les formules « mm » sont remises d'aplomb (surface lue dans « Surface couverte »)
+// et les tableaux couvrent toutes les données saisies (de la 1re ligne de données jusqu'en bas).
+function mettreAJourTableauxRecap() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var results = [];
+  PARCELLES.forEach(function (p) {
+    var sheet = findSheetByName(ss, p.sheet);
+    if (!sheet) { results.push(p.sheet + " : onglet introuvable"); return; }
+    var blocks = [];
+    p.lignes.forEach(function (li) { var b = findLigneBlock(sheet, li); if (b) blocks.push({ li: li, b: b }); });
+    if (!blocks.length) { results.push(p.sheet + " : blocs introuvables, rien modifié."); return; }
+
+    var enteteRow = trouverEnteteBilan(sheet, blocks[0].b);
+    var dejaEnHaut = enteteRow !== -1 && enteteRow < blocks[0].b.headerRow;
+    var besoinsParLigne = {};
+
+    if (enteteRow !== -1) {
+      blocks.forEach(function (x) {
+        var vals = sheet.getRange(enteteRow + 1, x.b.blockCol + 4, 5, 1).getValues();
+        besoinsParLigne[x.li] = vals.map(function (v) { return v[0]; });
+      });
+    }
+
+    if (!dejaEnHaut) {
+      if (enteteRow === -1) { results.push(p.sheet + " : tableau récapitulatif introuvable, rien modifié."); return; }
+      // sécurité : le tableau doit faire exactement 7 lignes (en-tête, 5 mois, TOTAL)
+      var finLabel = normTxt(sheet.getRange(enteteRow + 6, blocks[0].b.blockCol).getValue());
+      if (finLabel.indexOf("total") !== 0) { results.push(p.sheet + " : disposition inattendue sous les données, rien modifié."); return; }
+      sheet.deleteRows(enteteRow, 7);
+      sheet.insertRowsBefore(1, NB_LIGNES_RECAP);
+      sheet.getRange(1, 1, NB_LIGNES_RECAP, sheet.getMaxColumns()).clear();
+      // les repères de blocs ont bougé : on les relit
+      blocks = [];
+      p.lignes.forEach(function (li) { var b = findLigneBlock(sheet, li); if (b) blocks.push({ li: li, b: b }); });
+      results.push(p.sheet + " : tableaux déplacés en haut (anciennes lignes " + enteteRow + " à " + (enteteRow + 6) + " retirées des données).");
+    }
+
+    blocks.forEach(function (x) {
+      ecrireRecapBloc(sheet, x.b, x.li, besoinsParLigne[x.li]);
+      var m = reecrireFormulesMm(sheet, x.b);
+      results.push(p.sheet + " Ligne " + x.li + " : tableau mai→avril écrit ; " + m + ".");
+    });
+  });
   Logger.log(results.join("\n"));
   return results;
+}
+
+// Contrôle (n'écrit rien) : où le script trouve les blocs, les tableaux et le début des données.
+function verifierTableauxRecap() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), out = [];
+  PARCELLES.forEach(function (p) {
+    var sheet = findSheetByName(ss, p.sheet);
+    if (!sheet) { out.push(p.sheet + " : onglet introuvable"); return; }
+    p.lignes.forEach(function (li) {
+      var b = findLigneBlock(sheet, li);
+      if (!b) { out.push(p.sheet + " Ligne " + li + " : bloc introuvable"); return; }
+      var h = trouverEnteteBilan(sheet, b);
+      out.push(p.sheet + " Ligne " + li + " : colonne " + columnToLetter(b.blockCol) + ", en-têtes ligne " + b.headerRow +
+        ", données dès la ligne " + b.dataStartRow + ", tableau récapitulatif " +
+        (h === -1 ? "INTROUVABLE" : (h < b.headerRow ? "en haut (ligne " + h + ")" : "sous les données (ligne " + h + ") → lance mettreAJourTableauxRecap")) +
+        ", surface " + (cellSurfaceBloc(sheet, b) || "non trouvée"));
+    });
+  });
+  Logger.log(out.join("\n"));
+  return out;
 }
 
 /* ---------- Fonctions utilitaires partagées ---------- */
@@ -2208,7 +2050,9 @@ function findSheetByName(ss, name) {
 // Repère la colonne de bloc en cherchant le libellé "Ligne N..." dans les 6 premières lignes,
 // puis la ligne d'en-tête "Date" juste en dessous.
 function findLigneBlock(sheet, ligneIndex) {
-  var scanRows = 6;
+  // Le libellé « Ligne N » est cherché dans les 40 premières lignes : depuis que les tableaux
+  // récapitulatifs sont en haut de l'onglet, il se trouve plus bas (ex. ligne 17 à La Fontaine).
+  var scanRows = Math.min(40, sheet.getMaxRows());
   var scanCols = sheet.getLastColumn();
   var values = sheet.getRange(1, 1, scanRows, scanCols).getValues();
   var ligneRegex = new RegExp("^Ligne\\s*" + ligneIndex + "(\\s|\\(|$)", "i");
@@ -2262,13 +2106,21 @@ function blockColumns(blockCol) {
 // (et pas seulement M3) évite de réutiliser une ligne déjà occupée par une saisie Pluie
 // (qui remplit Date + Pluie(mm) mais laisse M3 vide).
 function findNextFreeRow(sheet, dataStartRow, colM3, colDate) {
-  var maxScan = 300;
-  for (var rowI = dataStartRow; rowI < dataStartRow + maxScan; rowI++) {
-    var m3v = sheet.getRange(rowI, colM3).getValue();
-    var dv = sheet.getRange(rowI, colDate).getValue();
-    var m3Blank = (m3v === "" || m3v === null);
-    var dateBlank = (dv === "" || dv === null);
-    if (m3Blank && dateBlank) return rowI;
+  var maxRows = sheet.getMaxRows();
+  var n = Math.min(maxRows - dataStartRow + 1, 1000);
+  if (n >= 1) {
+    var m3 = sheet.getRange(dataStartRow, colM3, n, 1).getValues();
+    var dt = sheet.getRange(dataStartRow, colDate, n, 1).getValues();
+    for (var i = 0; i < n; i++) {
+      var m3Blank = (m3[i][0] === "" || m3[i][0] === null);
+      var dateBlank = (dt[i][0] === "" || dt[i][0] === null);
+      if (m3Blank && dateBlank) return dataStartRow + i;
+    }
+  }
+  // Tableau plein : on ajoute des lignes en bas de l'onglet (sans dépasser ~1000 lignes de données)
+  if (maxRows - dataStartRow + 1 < 1000) {
+    sheet.insertRowsAfter(maxRows, 50);
+    return maxRows + 1;
   }
   return -1;
 }
@@ -2365,4 +2217,846 @@ function columnToLetter(col) {
 
 function jsonOutput(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/* ================================================================
+   SAISIES — contrôle avant enregistrement, correction, suppression, journal
+   ----------------------------------------------------------------
+   Appelé par l'appli (écran « Vérifie » et écran « Corriger ») :
+     doGet action=controle        → alertes éventuelles avant d'enregistrer
+     doGet action=saisies         → dernières saisies d'un module, avec leurs champs modifiables
+     doGet action=saisieModifier  → modifie une saisie (la ligne est vérifiée avant)
+     doGet action=saisieSupprimer → supprime une saisie
+   Chaque modification / suppression est écrite dans l'onglet « Journal » (avant / après).
+   ================================================================ */
+
+var JOURNAL_SHEET = "Journal";
+var NB_SAISIES_LISTE = 12;
+var MODULES_SAISIES = ["arrosage", "pluie", "heures", "pointage", "poids", "vente"];
+
+/* ---------- Outils communs ---------- */
+
+function fuseauClasseur() { return SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(); }
+function isoDate(d) { return Utilities.formatDate(d, fuseauClasseur(), "yyyy-MM-dd"); }
+function heureTexte(v) {
+  if (!(v instanceof Date)) return "";
+  return ("0" + v.getHours()).slice(-2) + ":" + ("0" + v.getMinutes()).slice(-2);
+}
+function datePourChamp(v) { return v instanceof Date ? isoDate(v) : ""; }
+function estVide(v) { return v === "" || v === null || v === undefined; }
+function nombreChamp(v) {
+  if (estVide(v)) return "";
+  var n = Number(String(v).replace(",", "."));
+  return isFinite(n) ? n : NaN;
+}
+function dateIsoValide(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s || "")); }
+function jourSemaineFR(d) {
+  return ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"][d.getDay()] + " " + formatDateFR(d);
+}
+
+// Empreinte d'une ligne : sert à vérifier qu'elle n'a pas changé entre l'affichage et la modification.
+function empreinte(valeurs) {
+  var s = valeurs.map(function (v) {
+    if (v instanceof Date) return String(v.getTime());
+    return estVide(v) ? "" : String(v);
+  }).join("~");
+  var h = 5381;
+  for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+function avecVerrou(fn) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(25000);
+  try { return fn(); } finally { lock.releaseLock(); }
+}
+
+function journaliser(action, module, avant, apres, detail) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sh = ss.getSheetByName(JOURNAL_SHEET);
+    if (!sh) {
+      sh = ss.insertSheet(JOURNAL_SHEET);
+      sh.getRange(1, 1, 1, 6).setValues([["Date et heure", "Action", "Module", "Avant", "Après", "Détail"]]).setFontWeight("bold");
+      try { sh.setFrozenRows(1); } catch (e0) {}
+    }
+    var r = sh.getLastRow() + 1;
+    sh.getRange(r, 1, 1, 6).setValues([[new Date(), action, module,
+      avant ? JSON.stringify(avant) : "", apres ? JSON.stringify(apres) : "", detail || ""]]);
+    sh.getRange(r, 1).setNumberFormat("dd/mm/yyyy hh:mm:ss");
+  } catch (e) { /* le journal ne doit jamais bloquer une correction */ }
+}
+
+// Supprime la ligne `row` d'un bloc de colonnes en remontant d'un cran tout ce qui est dessous
+// (jusqu'à `last`), colonnes [col, col+width[ seulement : les tableaux voisins ne bougent pas.
+function decalerHaut(sheet, col, width, row, last) {
+  if (row < last) {
+    sheet.getRange(row + 1, col, last - row, width).copyTo(sheet.getRange(row, col, last - row, width));
+  }
+  sheet.getRange(last, col, 1, width).clearContent();
+}
+
+function reponse(ok, message, extra) {
+  var o = { ok: ok };
+  if (ok) o.message = message || ""; else o.error = message || "Erreur";
+  if (extra) Object.keys(extra).forEach(function (k) { o[k] = extra[k]; });
+  return o;
+}
+var MSG_LIGNE_CHANGEE = "Cette ligne a changé depuis l'affichage de la liste. Rouvre « Corriger » pour la rafraîchir.";
+
+function canonDans(liste, valeur) {
+  var v = (valeur || "").toString().replace(/\s+/g, " ").trim();
+  var k = normTxt(v);
+  for (var i = 0; i < liste.length; i++) if (normTxt(liste[i]) === k) return liste[i].toString().trim();
+  return v;
+}
+
+/* ---------- Blocs d'irrigation (11 blocs : pluie sur tous, arrosage sur un) ---------- */
+
+function blocsIrrigation() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), out = [];
+  PARCELLES.forEach(function (p) {
+    var sh = ss.getSheetByName(p.sheet);
+    if (!sh) return;
+    p.lignes.forEach(function (li) {
+      var b = findLigneBlock(sh, li);
+      if (!b) return;
+      out.push({ sheet: sh, onglet: p.sheet, ligne: li, block: b, cols: blockColumns(b.blockCol) });
+    });
+  });
+  return out;
+}
+
+// Lignes d'un bloc : jusqu'à la dernière date renseignée. [{row, v:[10 colonnes]}]
+function lignesBloc(B) {
+  var sheet = B.sheet, start = B.block.dataStartRow, c = B.cols;
+  var max = Math.min(sheet.getMaxRows() - start + 1, 1000);
+  if (max < 1) return [];
+  var w = c.pluie - c.date + 1;
+  var vals = sheet.getRange(start, c.date, max, w).getValues();
+  var last = -1, i, out = [];
+  for (i = 0; i < vals.length; i++) if (!estVide(vals[i][0])) last = i;
+  for (i = 0; i <= last; i++) out.push({ row: start + i, v: vals[i] });
+  return out;
+}
+
+function trouverBloc(onglet, ligne) {
+  var blocs = blocsIrrigation(), res = null;
+  blocs.forEach(function (B) { if (normTxt(B.onglet) === normTxt(onglet) && B.ligne === Number(ligne)) res = B; });
+  return res;
+}
+
+function libelleLigne(onglet, ligne) {
+  var l = LABELS_LIGNE[onglet] && LABELS_LIGNE[onglet][ligne];
+  return onglet + " · " + (l || ("Ligne " + ligne));
+}
+
+/* ---------- PLUIE : écriture / suppression sur les 11 blocs ---------- */
+
+function ecrirePluie(dateValue, mm) {
+  var details = [];
+  blocsIrrigation().forEach(function (B) {
+    var targetRow = resolveTargetRow(B.sheet, B.block, B.cols, dateValue);
+    if (targetRow === -1) { details.push(B.onglet + " Ligne " + B.ligne + " : plus de ligne libre"); return; }
+    setValueColored(B.sheet.getRange(targetRow, B.cols.date), dateValue, COULEUR_PLUIE).setNumberFormat(FORMAT_DATE);
+    setValueColored(B.sheet.getRange(targetRow, B.cols.pluie), mm, COULEUR_PLUIE);
+    details.push(B.onglet + " Ligne " + B.ligne + " : ligne " + targetRow + " OK");
+  });
+  return details;
+}
+
+// Retire la saisie de pluie (date + mm, ou toute la pluie de la date si mm est null) de tous les blocs.
+function retirerPluie(isoJour, mm) {
+  var n = 0;
+  blocsIrrigation().forEach(function (B) {
+    var lignes = lignesBloc(B), last = lignes.length ? lignes[lignes.length - 1].row : -1;
+    for (var k = 0; k < lignes.length; k++) {
+      var v = lignes[k].v;
+      if (!(v[0] instanceof Date) || isoDate(v[0]) !== isoJour) continue;
+      if (typeof v[9] !== "number" || !estVide(v[7])) continue;
+      if (mm !== null && Math.abs(v[9] - mm) > 0.0001) continue;
+      decalerHaut(B.sheet, B.cols.date, B.cols.pluie - B.cols.date + 1, lignes[k].row, last);
+      n++;
+      break; // une seule ligne par bloc pour une saisie (date, mm) ; avec mm = null on boucle ci-dessous
+    }
+  });
+  return n;
+}
+function retirerToutePluieDate(isoJour) {
+  var total = 0, passes = 0;
+  while (passes++ < 10) { var n = retirerPluie(isoJour, null); if (!n) break; total += n; }
+  return total;
+}
+
+function pluieLister() {
+  var blocs = blocsIrrigation();
+  if (!blocs.length) return [];
+  var lignes = lignesBloc(blocs[0]), items = [];
+  for (var k = lignes.length - 1; k >= 0 && items.length < NB_SAISIES_LISTE; k--) {
+    var v = lignes[k].v;
+    if (!(v[0] instanceof Date) || typeof v[9] !== "number" || !estVide(v[7])) continue;
+    var j = isoDate(v[0]);
+    items.push({
+      id: "pluie|" + j + "|" + v[9], module: "pluie",
+      titre: "Pluie " + String(v[9]).replace(".", ",") + " mm", detail: formatDateFR(v[0]) + " · toutes les parcelles",
+      champs: [
+        { k: "date", label: "Date", type: "date", value: j },
+        { k: "mm", label: "Pluie (mm)", type: "number", step: "0.1", value: v[9] }
+      ]
+    });
+  }
+  return items;
+}
+
+function pluieModifier(p, v) {
+  var jOld = p[1], mmOld = Number(p[2]);
+  var mm = nombreChamp(v.mm);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  if (estVide(mm) || isNaN(mm) || mm < 0) return reponse(false, "Pluie invalide.");
+  var n = retirerPluie(jOld, mmOld);
+  if (!n) return reponse(false, MSG_LIGNE_CHANGEE);
+  ecrirePluie(parseDateOnly(v.date), mm);
+  journaliser("Modification", "Pluie", { date: jOld, mm: mmOld }, { date: v.date, mm: mm }, n + " ligne(s) corrigée(s)");
+  return reponse(true, "Pluie corrigée sur toutes les parcelles.");
+}
+
+function pluieSupprimer(p) {
+  var n = retirerPluie(p[1], Number(p[2]));
+  if (!n) return reponse(false, MSG_LIGNE_CHANGEE);
+  journaliser("Suppression", "Pluie", { date: p[1], mm: Number(p[2]) }, null, n + " ligne(s) retirée(s)");
+  return reponse(true, "Pluie supprimée sur toutes les parcelles.");
+}
+
+/* ---------- ARROSAGE ---------- */
+
+function ecrireArrosage(sheet, block, cols, d) {
+  var dateValue = d.date ? parseDateOnly(d.date) : "";
+  var targetRow = resolveTargetRow(sheet, block, cols, dateValue);
+  if (targetRow === -1) return -1;
+  setValueColored(sheet.getRange(targetRow, cols.date), dateValue, COULEUR_ARROSAGE).setNumberFormat(FORMAT_DATE);
+  [["duree", d.duree], ["debut", d.compteur_debut], ["fin", d.compteur_fin], ["m3", d.m3]].forEach(function (c) {
+    var n = nombreChamp(c[1]);
+    if (!estVide(n) && !isNaN(n)) setValueColored(sheet.getRange(targetRow, cols[c[0]]), n, COULEUR_ARROSAGE);
+  });
+  if (d.heure_debut) sheet.getRange(targetRow, cols.heureDebut).setValue(parseHeure(d.heure_debut)).setNumberFormat("HH:mm").setFontColor(COULEUR_ARROSAGE);
+  if (d.heure_fin) sheet.getRange(targetRow, cols.heureFin).setValue(parseHeure(d.heure_fin)).setNumberFormat("HH:mm").setFontColor(COULEUR_ARROSAGE);
+  return targetRow;
+}
+
+function arrosageLister() {
+  var items = [];
+  blocsIrrigation().forEach(function (B) {
+    lignesBloc(B).forEach(function (L) {
+      var v = L.v;
+      if (!(v[0] instanceof Date) || typeof v[7] !== "number" || v[7] <= 0) return;
+      var c1 = typeof v[4] === "number" ? v[4] : "", c2 = typeof v[5] === "number" ? v[5] : "";
+      items.push({
+        _t: v[0].getTime(), _r: L.row,
+        id: ["arrosage", B.onglet, B.ligne, L.row, empreinte([v[0], v[7], v[4], v[5], v[3]])].join("|"),
+        module: "arrosage",
+        titre: libelleLigne(B.onglet, B.ligne) + " · " + Math.round(v[7] * 10) / 10 + " m³",
+        detail: formatDateFR(v[0]) + (c1 !== "" && c2 !== "" ? " · compteur " + c1 + " → " + c2 : ""),
+        champs: [
+          { k: "date", label: "Date", type: "date", value: isoDate(v[0]) },
+          { k: "heure_debut", label: "Heure début", type: "time", value: heureTexte(v[1]) },
+          { k: "heure_fin", label: "Heure fin", type: "time", value: heureTexte(v[2]) },
+          { k: "duree", label: "Durée (h)", type: "number", step: "0.1", value: typeof v[3] === "number" ? v[3] : "" },
+          { k: "compteur_debut", label: "Compteur début", type: "number", step: "any", value: c1 },
+          { k: "compteur_fin", label: "Compteur fin", type: "number", step: "any", value: c2 },
+          { k: "m3", label: "Volume (m³) — calculé si les 2 compteurs sont remplis", type: "number", step: "any", value: v[7] }
+        ]
+      });
+    });
+  });
+  items.sort(function (a, b) { return b._t - a._t || b._r - a._r; });
+  return items.slice(0, NB_SAISIES_LISTE).map(function (i) { delete i._t; delete i._r; return i; });
+}
+
+function arrosageLigneVerifiee(p) {
+  var B = trouverBloc(p[1], p[2]);
+  if (!B) return { err: "Bloc introuvable." };
+  var row = Number(p[3]), c = B.cols;
+  var v = B.sheet.getRange(row, c.date, 1, c.pluie - c.date + 1).getValues()[0];
+  if (empreinte([v[0], v[7], v[4], v[5], v[3]]) !== p[4]) return { err: MSG_LIGNE_CHANGEE };
+  var lignes = lignesBloc(B);
+  return { B: B, row: row, v: v, last: lignes.length ? lignes[lignes.length - 1].row : row };
+}
+
+function arrosageAvant(v) {
+  return { date: v[0] instanceof Date ? isoDate(v[0]) : "", heure_debut: heureTexte(v[1]), heure_fin: heureTexte(v[2]),
+    duree: v[3], compteur_debut: v[4], compteur_fin: v[5], m3: v[7] };
+}
+
+function arrosageModifier(p, v) {
+  var R = arrosageLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  var duree = nombreChamp(v.duree), c1 = nombreChamp(v.compteur_debut), c2 = nombreChamp(v.compteur_fin), m3 = nombreChamp(v.m3);
+  if ([duree, c1, c2, m3].some(function (x) { return typeof x === "number" && isNaN(x); })) return reponse(false, "Une valeur n'est pas un nombre.");
+  if (typeof c1 === "number" && typeof c2 === "number") {
+    if (c2 <= c1) return reponse(false, "Le compteur fin doit être supérieur au compteur début.");
+    m3 = Math.round((c2 - c1) * 10) / 10;
+  }
+  if (typeof m3 !== "number" || m3 <= 0) return reponse(false, "Le volume (m³) doit être supérieur à 0.");
+  var avant = arrosageAvant(R.v);
+  decalerHaut(R.B.sheet, R.B.cols.date, R.B.cols.pluie - R.B.cols.date + 1, R.row, R.last);
+  var apres = { date: v.date, heure_debut: v.heure_debut || "", heure_fin: v.heure_fin || "", duree: duree, compteur_debut: c1, compteur_fin: c2, m3: m3 };
+  var row = ecrireArrosage(R.B.sheet, R.B.block, R.B.cols, apres);
+  if (row === -1) return reponse(false, "Plus de ligne libre dans le tableau.");
+  journaliser("Modification", "Arrosage " + libelleLigne(R.B.onglet, R.B.ligne), avant, apres, "ligne " + row);
+  return reponse(true, "Arrosage corrigé.");
+}
+
+function arrosageSupprimer(p) {
+  var R = arrosageLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  decalerHaut(R.B.sheet, R.B.cols.date, R.B.cols.pluie - R.B.cols.date + 1, R.row, R.last);
+  journaliser("Suppression", "Arrosage " + libelleLigne(R.B.onglet, R.B.ligne), arrosageAvant(R.v), null, "ligne " + R.row);
+  return reponse(true, "Arrosage supprimé.");
+}
+
+/* ---------- HEURES ---------- */
+
+function lignesHeures(sheet) {
+  var max = Math.min(sheet.getMaxRows() - HEURES_DATA_START_ROW + 1, 2000);
+  if (max < 1) return [];
+  var vals = sheet.getRange(HEURES_DATA_START_ROW, HEURES_COL_DATE, max, 6).getValues(), out = [];
+  for (var i = 0; i < vals.length; i++) {
+    if (estVide(vals[i][0])) break;
+    out.push({ row: HEURES_DATA_START_ROW + i, v: vals[i] });
+  }
+  return out;
+}
+
+function ecrireHeures(sheet, dateValue, nom, lieu, tache, duree) {
+  ajouterSiNouveau(sheet, HEURES_LIEU_LIST_COL, HEURES_LIEU_LIST_START, lieu, HEURES_LIEU_RECAP_WIDTH);
+  ajouterSiNouveau(sheet, HEURES_TACHE_LIST_COL, HEURES_TACHE_LIST_START, tache, HEURES_TACHE_RECAP_WIDTH);
+  var targetRow = resolveTargetRowHeures(sheet, dateValue);
+  if (targetRow === -1) return -1;
+  sheet.getRange(targetRow, HEURES_COL_DATE).setValue(dateValue).setNumberFormat(FORMAT_DATE);
+  sheet.getRange(targetRow, HEURES_COL_PERSONNE).setValue(nom);
+  sheet.getRange(targetRow, HEURES_COL_LIEU).setValue(lieu);
+  sheet.getRange(targetRow, HEURES_COL_TACHE).setValue(tache);
+  sheet.getRange(targetRow, HEURES_COL_TEMPS).setValue(duree);
+  sheet.getRange(targetRow, HEURES_COL_HORODATAGE).setValue(new Date()).setNumberFormat("dd/mm/yyyy hh:mm:ss");
+  return targetRow;
+}
+
+function personneCanonique(nom) {
+  var k = normTxt(nom), res = null;
+  HEURES_PERSONNES.forEach(function (p) { if (normTxt(p) === k) res = p; });
+  return res;
+}
+
+function heuresLister() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HEURES_SHEET);
+  if (!sheet) return [];
+  var listes = obtenirListesHeures();
+  var lignes = lignesHeures(sheet);
+  lignes.sort(function (a, b) {
+    var ha = a.v[5] instanceof Date ? a.v[5].getTime() : 0, hb = b.v[5] instanceof Date ? b.v[5].getTime() : 0;
+    return hb - ha || b.row - a.row;
+  });
+  return lignes.slice(0, NB_SAISIES_LISTE).map(function (L) {
+    var v = L.v;
+    return {
+      id: ["heures", L.row, empreinte([v[0], v[1], v[2], v[3], v[4]])].join("|"), module: "heures",
+      titre: (v[1] || "?") + " · " + (v[4] || 0) + " h",
+      detail: formatDateFR(v[0]) + " · " + (v[2] || "") + " · " + (v[3] || ""),
+      champs: [
+        { k: "date", label: "Date", type: "date", value: datePourChamp(v[0]) },
+        { k: "personne", label: "Personne", type: "select", options: HEURES_PERSONNES, value: v[1] },
+        { k: "lieu", label: "Lieu", type: "combo", options: listes.lieux, value: v[2] },
+        { k: "tache", label: "Tâche", type: "combo", options: listes.taches, value: v[3] },
+        { k: "temps", label: "Durée (h)", type: "number", step: "0.25", value: v[4] }
+      ]
+    };
+  });
+}
+
+function heuresLigneVerifiee(p) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HEURES_SHEET);
+  if (!sheet) return { err: "Onglet 'Heures' introuvable." };
+  var row = Number(p[1]);
+  var v = sheet.getRange(row, HEURES_COL_DATE, 1, 6).getValues()[0];
+  if (empreinte([v[0], v[1], v[2], v[3], v[4]]) !== p[2]) return { err: MSG_LIGNE_CHANGEE };
+  var l = lignesHeures(sheet);
+  return { sheet: sheet, row: row, v: v, last: l.length ? l[l.length - 1].row : row };
+}
+
+function heuresAvant(v) { return { date: datePourChamp(v[0]), personne: v[1], lieu: v[2], tache: v[3], temps: v[4] }; }
+
+function heuresModifier(p, v) {
+  var R = heuresLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  var nom = personneCanonique(v.personne), duree = nombreChamp(v.temps);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  if (!nom) return reponse(false, "Personne inconnue : " + v.personne);
+  if (estVide(duree) || isNaN(duree) || duree <= 0) return reponse(false, "Durée invalide.");
+  var listes = obtenirListesHeures();
+  var lieu = canonDans(listes.lieux, v.lieu), tache = canonDans(listes.taches, v.tache);
+  if (!lieu || !tache) return reponse(false, "Lieu et tâche obligatoires.");
+  var avant = heuresAvant(R.v);
+  decalerHaut(R.sheet, HEURES_COL_DATE, 6, R.row, R.last);
+  var row = ecrireHeures(R.sheet, parseDateOnly(v.date), nom, lieu, tache, duree);
+  if (row === -1) return reponse(false, "Plus de ligne libre.");
+  journaliser("Modification", "Heures", avant, { date: v.date, personne: nom, lieu: lieu, tache: tache, temps: duree }, "ligne " + row);
+  return reponse(true, "Saisie d'heures corrigée.");
+}
+
+function heuresSupprimer(p) {
+  var R = heuresLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  decalerHaut(R.sheet, HEURES_COL_DATE, 6, R.row, R.last);
+  journaliser("Suppression", "Heures", heuresAvant(R.v), null, "ligne " + R.row);
+  return reponse(true, "Saisie d'heures supprimée.");
+}
+
+/* ---------- POINTAGE (Récolte pointage) ---------- */
+
+function lignesPointage(sheet) {
+  var max = Math.min(sheet.getMaxRows() - RECOLTE_DATA_START_ROW + 1, 3000);
+  if (max < 1) return [];
+  var vals = sheet.getRange(RECOLTE_DATA_START_ROW, 1, max, RECOLTE_NB_COLS).getValues(), out = [];
+  for (var i = 0; i < vals.length; i++) {
+    if (estVide(vals[i][RECOLTE_COL_DATE - 1])) break;
+    out.push({ row: RECOLTE_DATA_START_ROW + i, v: vals[i] });
+  }
+  return out;
+}
+function empreintePointage(v) { return empreinte([v[0], v[1], v[2], v[3], v[RECOLTE_COL_COMMENT - 1]]); }
+function pointageAvant(v) {
+  return { no: v[0], date: datePourChamp(v[1]), parcelle: v[2], poids: v[3], commentaire: v[RECOLTE_COL_COMMENT - 1] };
+}
+// « Brumale » doit toujours figurer dans le commentaire : l'info reste lisible même si le type change.
+function commentaireAvecBrumale(poids, commentaire) {
+  var c = (commentaire || "").toString().trim();
+  if (poids === "Brumale" && !/brumale/i.test(c)) c = "Brumale" + (c ? " · " + c : "");
+  return c;
+}
+
+function pointageLister() {
+  var sheet = ongletPointage(SpreadsheetApp.getActiveSpreadsheet());
+  if (!sheet) return [];
+  var lignes = lignesPointage(sheet).slice(-NB_SAISIES_LISTE).reverse();
+  return lignes.map(function (L) {
+    var v = L.v, com = v[RECOLTE_COL_COMMENT - 1] || "";
+    return {
+      id: ["pointage", L.row, empreintePointage(v)].join("|"), module: "pointage",
+      titre: "Truffe n°" + v[0] + " · " + v[3],
+      detail: formatDateFR(v[1]) + " · " + (v[2] || "") + (com ? " · " + com : ""),
+      champs: [
+        { k: "date", label: "Date", type: "date", value: datePourChamp(v[1]) },
+        { k: "parcelle", label: "Parcelle", type: "select", options: RECOLTE_PARCELLES, value: v[2] },
+        { k: "poids", label: "Poids / type", type: "select", options: RECOLTE_POIDS, value: v[3] },
+        { k: "commentaire", label: "Commentaire", type: "text", value: com }
+      ]
+    };
+  });
+}
+
+function pointageLigneVerifiee(p) {
+  var sheet = ongletPointage(SpreadsheetApp.getActiveSpreadsheet());
+  if (!sheet) return { err: "Onglet 'Récolte pointage' introuvable." };
+  var row = Number(p[1]);
+  var v = sheet.getRange(row, 1, 1, RECOLTE_NB_COLS).getValues()[0];
+  if (empreintePointage(v) !== p[2]) return { err: MSG_LIGNE_CHANGEE };
+  var l = lignesPointage(sheet);
+  return { sheet: sheet, row: row, v: v, last: l.length ? l[l.length - 1].row : row };
+}
+
+function pointageModifier(p, v) {
+  var R = pointageLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  if (RECOLTE_PARCELLES.indexOf(v.parcelle) === -1) return reponse(false, "Parcelle inconnue : " + v.parcelle);
+  if (RECOLTE_POIDS.indexOf(v.poids) === -1) return reponse(false, "Poids inconnu : " + v.poids);
+  var com = commentaireAvecBrumale(v.poids, v.commentaire);
+  var avant = pointageAvant(R.v);
+  R.sheet.getRange(R.row, RECOLTE_COL_DATE).setValue(parseDateOnly(v.date)).setNumberFormat(FORMAT_DATE);
+  R.sheet.getRange(R.row, RECOLTE_COL_PARCELLE).setValue(v.parcelle);
+  R.sheet.getRange(R.row, RECOLTE_COL_POIDS).setNumberFormat("@").setValue(v.poids);
+  R.sheet.getRange(R.row, RECOLTE_COL_COMMENT).setValue(com);
+  journaliser("Modification", "Pointage", avant, { no: R.v[0], date: v.date, parcelle: v.parcelle, poids: v.poids, commentaire: com }, "ligne " + R.row);
+  return reponse(true, "Truffe corrigée.");
+}
+
+function pointageSupprimer(p) {
+  var R = pointageLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  decalerHaut(R.sheet, 1, RECOLTE_NB_COLS, R.row, R.last);
+  journaliser("Suppression", "Pointage", pointageAvant(R.v), null, "ligne " + R.row);
+  return reponse(true, "Truffe supprimée (les numéros des autres truffes ne changent pas).");
+}
+
+/* ---------- POIDS (Récolte volume) ---------- */
+
+function poidsEnGrammes(info, col, valeur) {
+  if (typeof valeur !== "number") return 0;
+  return (info.units[col] || "g") === "kg" ? Math.round(valeur * 1000) : valeur;
+}
+
+function poidsLister() {
+  var info = infosOngletVolume(false);
+  if (!info) return [];
+  var bloc = lireBlocBorne(info.sheet, info.startRow, 1, info.dernierCol, NB_MAX_LIGNES), lignes = [];
+  for (var i = 0; i < bloc.length; i++) {
+    if (estVide(bloc[i][info.dateCol - 1])) break;
+    lignes.push(i);
+  }
+  var items = [];
+  for (var k = lignes.length - 1; k >= 0 && items.length < NB_SAISIES_LISTE; k--) {
+    var i2 = lignes[k], row = bloc[i2], d = row[info.dateCol - 1];
+    PARCELLES_VOLUME.forEach(function (pv) {
+      var grp = info.groups[pv.key];
+      if (!grp) return;
+      TYPES_POIDS.forEach(function (t) {
+        if (!grp[t]) return;
+        var g = poidsEnGrammes(info, grp[t], row[grp[t] - 1]);
+        if (g <= 0 || !(d instanceof Date)) return;
+        var colCom = info.commentCols[pv.key] || info.commentCol;
+        var com = colCom ? (row[colCom - 1] || "").toString() : "";
+        items.push({
+          id: ["poids", info.startRow + i2, pv.key, t, empreinte([d, g, com])].join("|"), module: "poids",
+          titre: pv.label + " · " + LIBELLES_TYPES[t] + " · " + g + " g",
+          detail: formatDateFR(d) + (com ? " · " + com : ""),
+          champs: [
+            { k: "date", label: "Date", type: "date", value: datePourChamp(d) },
+            { k: "parcelle", label: "Parcelle", type: "select", options: PARCELLES_VOLUME.map(function (x) { return x.label; }), value: pv.label },
+            { k: "type", label: "Type de poids", type: "select", options: TYPES_POIDS.map(function (x) { return { v: x, l: LIBELLES_TYPES[x] }; }), value: t },
+            { k: "poids", label: "Poids (g)", type: "number", step: "1", value: g },
+            { k: "commentaire", label: "Commentaire", type: "text", value: com }
+          ]
+        });
+      });
+    });
+  }
+  return items;
+}
+
+function poidsLigneVerifiee(p) {
+  var info = infosOngletVolume(false);
+  if (!info) return { err: "Onglet 'Récolte volume' introuvable." };
+  var row = Number(p[1]), key = p[2], type = p[3];
+  var grp = info.groups[key];
+  if (!grp || !grp[type]) return { err: "Colonne introuvable." };
+  var vals = info.sheet.getRange(row, 1, 1, info.dernierCol).getValues()[0];
+  var d = vals[info.dateCol - 1], col = grp[type];
+  var g = poidsEnGrammes(info, col, vals[col - 1]);
+  var colCom = info.commentCols[key] || info.commentCol;
+  var com = colCom ? (vals[colCom - 1] || "").toString() : "";
+  if (empreinte([d, g, com]) !== p[4]) return { err: MSG_LIGNE_CHANGEE };
+  return { info: info, row: row, key: key, type: type, col: col, colCom: colCom, vals: vals, d: d, g: g, com: com };
+}
+
+function ligneVolumeSansPoids(info, row) {
+  var vals = info.sheet.getRange(row, 1, 1, info.dernierCol).getValues()[0], reste = false;
+  TYPES_POIDS.forEach(function (t) {
+    colsDuType(info, t).forEach(function (c) { if (typeof vals[c - 1] === "number" && vals[c - 1] > 0) reste = true; });
+  });
+  return !reste;
+}
+
+function retirerCelluleVolume(R) {
+  var info = R.info, sheet = info.sheet;
+  sheet.getRange(R.row, R.col).clearContent();
+  var autres = TYPES_POIDS.some(function (t) {
+    var c = info.groups[R.key][t];
+    return c && c !== R.col && typeof sheet.getRange(R.row, c).getValue() === "number" && sheet.getRange(R.row, c).getValue() > 0;
+  });
+  if (R.colCom && !autres) sheet.getRange(R.row, R.colCom).clearContent();
+  if (ligneVolumeSansPoids(info, R.row)) {
+    var bloc = lireBlocBorne(sheet, info.startRow, 1, info.dateCol, NB_MAX_LIGNES), last = info.startRow - 1;
+    for (var i = 0; i < bloc.length; i++) { if (estVide(bloc[i][info.dateCol - 1])) break; last = info.startRow + i; }
+    decalerHaut(sheet, 1, info.dernierCol, R.row, Math.max(last, R.row));
+  }
+  assurerTotauxVolume(info);
+}
+
+function poidsModifier(p, v) {
+  var R = poidsLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  var g = nombreChamp(v.poids), key = cleParcelleLabel(v.parcelle);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  if (!key) return reponse(false, "Parcelle inconnue.");
+  if (TYPES_POIDS.indexOf(v.type) === -1) return reponse(false, "Type de poids inconnu.");
+  if (estVide(g) || isNaN(g) || g <= 0) return reponse(false, "Poids invalide.");
+  var info = R.info, avant = { date: datePourChamp(R.d), parcelle: R.key, type: R.type, poids: R.g, commentaire: R.com };
+  var apres = { date: v.date, parcelle: v.parcelle, type: v.type, poids: g, commentaire: (v.commentaire || "").toString().trim() };
+  var memeCase = key === R.key && v.type === R.type && jourStr(parseDateOnly(v.date), info.tz) === jourStr(R.d, info.tz);
+  if (memeCase) {
+    var unite = info.units[R.col] || "g";
+    info.sheet.getRange(R.row, R.col).setValue(unite === "kg" ? g / 1000 : g);
+    if (R.colCom) info.sheet.getRange(R.row, R.colCom).setValue(apres.commentaire);
+    assurerTotauxVolume(info);
+  } else {
+    retirerCelluleVolume(R);
+    var res = JSON.parse(handleRecolteVolume({ date: v.date, parcelle: v.parcelle, type: v.type, poids: g, commentaire: apres.commentaire }).getContent());
+    if (!res.ok) return reponse(false, res.error || "Échec de l'écriture.");
+  }
+  journaliser("Modification", "Poids", avant, apres, "");
+  return reponse(true, "Poids corrigé.");
+}
+
+function poidsSupprimer(p) {
+  var R = poidsLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  retirerCelluleVolume(R);
+  journaliser("Suppression", "Poids", { date: datePourChamp(R.d), parcelle: R.key, type: R.type, poids: R.g, commentaire: R.com }, null, "");
+  return reponse(true, "Poids supprimé.");
+}
+
+/* ---------- VENTE ---------- */
+
+function lignesVente(info) {
+  var bloc = lireBlocBorne(info.sheet, info.startRow, 1, info.dernierCol, NB_MAX_LIGNES), out = [];
+  for (var i = 0; i < bloc.length; i++) {
+    if (estVide(bloc[i][0])) break;
+    out.push({ row: info.startRow + i, v: bloc[i] });
+  }
+  return out;
+}
+function empreinteVente(info, v) {
+  var a = [v[0], info.clientCol ? v[info.clientCol - 1] : ""];
+  QUALITES_VENTE.forEach(function (q) { a.push(v[info.cols[q.key].prix - 1], v[info.cols[q.key].poids - 1]); });
+  return empreinte(a);
+}
+function venteAvant(info, v) {
+  var o = { date: datePourChamp(v[0]), client: info.clientCol ? v[info.clientCol - 1] : "", q: {} };
+  QUALITES_VENTE.forEach(function (q) {
+    var w = v[info.cols[q.key].poids - 1];
+    if (typeof w === "number" && w > 0) o.q[q.label] = { prix: v[info.cols[q.key].prix - 1], poids: w };
+  });
+  return o;
+}
+
+function venteLister() {
+  var info = infosOngletVente(false);
+  if (!info) return [];
+  var clients = info.listCol ? lireListeClients(info) : CLIENTS_PAR_DEFAUT.slice();
+  return lignesVente(info).slice(-NB_SAISIES_LISTE).reverse().map(function (L) {
+    var v = L.v, champs = [
+      { k: "date", label: "Date", type: "date", value: datePourChamp(v[0]) },
+      { k: "client", label: "Client", type: "combo", options: clients, value: info.clientCol ? (v[info.clientCol - 1] || "") : "" }
+    ], g = 0, eur = 0;
+    QUALITES_VENTE.forEach(function (q) {
+      var pr = v[info.cols[q.key].prix - 1], w = v[info.cols[q.key].poids - 1];
+      if (typeof w === "number" && w > 0) { g += w; eur += (Number(pr) || 0) * w / 1000; }
+      champs.push({ k: "prix_" + q.key, label: q.label + " — prix (€/kg)", type: "number", step: "0.01", value: typeof pr === "number" ? pr : "" });
+      champs.push({ k: "poids_" + q.key, label: q.label + " — poids (g)", type: "number", step: "1", value: typeof w === "number" ? w : "" });
+    });
+    return {
+      id: ["vente", L.row, empreinteVente(info, v)].join("|"), module: "vente",
+      titre: (info.clientCol && v[info.clientCol - 1] ? v[info.clientCol - 1] : "Vente") + " · " + Math.round(eur * 100) / 100 + " €",
+      detail: formatDateFR(v[0]) + " · " + g + " g", champs: champs
+    };
+  });
+}
+
+function venteLigneVerifiee(p) {
+  var info = infosOngletVente(false);
+  if (!info) return { err: "Onglet 'Vente' introuvable." };
+  var row = Number(p[1]);
+  var v = info.sheet.getRange(row, 1, 1, info.dernierCol).getValues()[0];
+  if (empreinteVente(info, v) !== p[2]) return { err: MSG_LIGNE_CHANGEE };
+  var l = lignesVente(info);
+  return { info: info, row: row, v: v, last: l.length ? l[l.length - 1].row : row };
+}
+
+function venteModifier(p, v) {
+  var R = venteLigneVerifiee(p), info = R.info;
+  if (R.err) return reponse(false, R.err);
+  if (!dateIsoValide(v.date)) return reponse(false, "Date invalide.");
+  var lignes = [];
+  for (var i = 0; i < QUALITES_VENTE.length; i++) {
+    var q = QUALITES_VENTE[i], pr = nombreChamp(v["prix_" + q.key]), w = nombreChamp(v["poids_" + q.key]);
+    if (estVide(pr) && estVide(w)) continue;
+    if (isNaN(pr) || isNaN(w) || estVide(pr) || estVide(w) || pr <= 0 || w <= 0) return reponse(false, "Prix et poids doivent tous deux être renseignés (et positifs) pour « " + q.label + " ».");
+    lignes.push({ qualite: q.label, prix: Math.round(pr * 100) / 100, poids: Math.round(w) });
+  }
+  if (!lignes.length) return reponse(false, "Renseigne au moins une qualité.");
+  var info2 = assurerColonnesClient(info);
+  var client = canonDans(info2.listCol ? lireListeClients(info2) : [], v.client);
+  var avant = venteAvant(info, R.v);
+  var memeLigne = jourStr(parseDateOnly(v.date), info.tz) === jourStr(R.v[0], info.tz) &&
+    normTxt(client) === normTxt(info.clientCol ? R.v[info.clientCol - 1] : "");
+  if (memeLigne) {
+    QUALITES_VENTE.forEach(function (q) {
+      var cp = info.sheet.getRange(R.row, info.cols[q.key].prix), cw = info.sheet.getRange(R.row, info.cols[q.key].poids);
+      var l = lignes.filter(function (x) { return x.qualite === q.label; })[0];
+      if (l) { cp.setValue(l.prix); cw.setValue(l.poids); } else { cp.clearContent(); cw.clearContent(); }
+    });
+    if (info.clientCol && client) info.sheet.getRange(R.row, info.clientCol).setValue(client);
+    ajouterClientSiNouveau(info2, client);
+    assurerTotauxVente(info);
+  } else {
+    decalerHaut(info.sheet, 1, info.dernierCol, R.row, R.last);
+    var res = JSON.parse(handleVente({ date: v.date, client: client, lignes: lignes }).getContent());
+    if (!res.ok) return reponse(false, res.error || "Échec de l'écriture.");
+  }
+  journaliser("Modification", "Vente", avant, { date: v.date, client: client, q: lignes }, "");
+  return reponse(true, "Vente corrigée.");
+}
+
+function venteSupprimer(p) {
+  var R = venteLigneVerifiee(p);
+  if (R.err) return reponse(false, R.err);
+  decalerHaut(R.info.sheet, 1, R.info.dernierCol, R.row, R.last);
+  assurerTotauxVente(R.info);
+  journaliser("Suppression", "Vente", venteAvant(R.info, R.v), null, "ligne " + R.row);
+  return reponse(true, "Vente supprimée.");
+}
+
+/* ---------- Point d'entrée : liste / modifier / supprimer ---------- */
+
+function obtenirSaisies(module) {
+  var f = { arrosage: arrosageLister, pluie: pluieLister, heures: heuresLister, pointage: pointageLister, poids: poidsLister, vente: venteLister }[module];
+  if (!f) return { module: module, items: [], error: "Module inconnu." };
+  return { module: module, items: f() };
+}
+
+function modifierSaisie(id, valeurs) {
+  try {
+    return avecVerrou(function () {
+      var p = String(id || "").split("|");
+      var f = { arrosage: arrosageModifier, pluie: pluieModifier, heures: heuresModifier, pointage: pointageModifier, poids: poidsModifier, vente: venteModifier }[p[0]];
+      if (!f) return reponse(false, "Saisie inconnue.");
+      var r = f(p, valeurs || {});
+      SpreadsheetApp.flush();
+      return r;
+    });
+  } catch (e) { return reponse(false, "Erreur : " + e.message); }
+}
+
+function supprimerSaisie(id) {
+  try {
+    return avecVerrou(function () {
+      var p = String(id || "").split("|");
+      var f = { arrosage: arrosageSupprimer, pluie: pluieSupprimer, heures: heuresSupprimer, pointage: pointageSupprimer, poids: poidsSupprimer, vente: venteSupprimer }[p[0]];
+      if (!f) return reponse(false, "Saisie inconnue.");
+      var r = f(p);
+      SpreadsheetApp.flush();
+      return r;
+    });
+  } catch (e) { return reponse(false, "Erreur : " + e.message); }
+}
+
+/* ---------- Contrôle avant enregistrement ---------- */
+
+function controlerSaisie(p) {
+  var alertes = [], mode = p.mode;
+  function avertir(t) { alertes.push({ niveau: "warn", texte: t }); }
+  function bloquer(t) { alertes.push({ niveau: "stop", texte: t }); }
+  var res = { alertes: alertes, remplacable: false };
+
+  if (dateIsoValide(p.date)) {
+    var auj = parseDateOnly(isoDate(new Date())), d = parseDateOnly(p.date);
+    var diff = Math.round((d.getTime() - auj.getTime()) / 86400000);
+    if (diff > 0) avertir("La date (" + jourSemaineFR(d) + ") est dans le futur.");
+    else if (diff < -7) avertir("La date est ancienne : " + jourSemaineFR(d) + " (il y a " + (-diff) + " jours).");
+  } else if (mode !== "recolte") {
+    bloquer("La date est invalide.");
+  }
+
+  if (mode === "pluie") {
+    var mm = nombreChamp(p.mm);
+    if (estVide(mm) || isNaN(mm) || mm < 0) bloquer("La pluie n'est pas un nombre valide.");
+    else if (mm >= 80) avertir("Pluie très élevée : " + mm + " mm en un jour. Est-ce bien exact ?");
+    var blocs = blocsIrrigation();
+    if (blocs.length && dateIsoValide(p.date)) {
+      var deja = [];
+      lignesBloc(blocs[0]).forEach(function (L) {
+        if (L.v[0] instanceof Date && isoDate(L.v[0]) === p.date && typeof L.v[9] === "number" && estVide(L.v[7])) deja.push(L.v[9]);
+      });
+      if (deja.length) {
+        avertir("Une pluie est déjà saisie ce jour-là : " + deja.join(" + ").replace(/\./g, ",") + " mm. Tu peux la remplacer ou ajouter celle-ci en plus.");
+        res.remplacable = true;
+      }
+    }
+  }
+
+  if (mode === "arrosage") {
+    var c1 = nombreChamp(p.compteur_debut), c2 = nombreChamp(p.compteur_fin), m3 = nombreChamp(p.m3), du = nombreChamp(p.duree);
+    if (typeof c1 === "number" && typeof c2 === "number" && !isNaN(c1) && !isNaN(c2)) {
+      if (c2 <= c1) bloquer("Le compteur fin (" + c2 + ") doit être supérieur au compteur début (" + c1 + ").");
+      else if (typeof m3 === "number" && Math.abs((c2 - c1) - m3) > 1) avertir("Le volume saisi (" + m3 + " m³) ne correspond pas à l'écart des compteurs (" + Math.round((c2 - c1) * 10) / 10 + " m³).");
+    }
+    if (typeof m3 === "number" && !isNaN(m3) && m3 <= 0) bloquer("Le volume doit être supérieur à 0.");
+    if (typeof du === "number" && du > 48) avertir("Durée de " + du + " h : très longue. Est-ce bien exact ?");
+    var B = trouverBloc(p.onglet, p.ligne);
+    if (B && dateIsoValide(p.date)) {
+      var memeJour = false, precedent = null;
+      lignesBloc(B).forEach(function (L) {
+        if (!(L.v[0] instanceof Date) || typeof L.v[7] !== "number" || L.v[7] <= 0) return;
+        if (isoDate(L.v[0]) === p.date) memeJour = true;
+      });
+      if (memeJour) avertir("Un arrosage est déjà saisi ce jour-là sur " + libelleLigne(p.onglet, p.ligne) + ".");
+      // continuité des compteurs : le compteur début doit reprendre le dernier compteur fin de l'onglet
+      var dernier = null;
+      blocsIrrigation().forEach(function (b2) {
+        if (normTxt(b2.onglet) !== normTxt(p.onglet)) return;
+        lignesBloc(b2).forEach(function (L) {
+          if (!(L.v[0] instanceof Date) || typeof L.v[5] !== "number" || typeof L.v[7] !== "number" || L.v[7] <= 0) return;
+          if (isoDate(L.v[0]) > p.date) return;
+          if (!dernier || L.v[0].getTime() >= dernier.t) dernier = { t: L.v[0].getTime(), fin: L.v[5] };
+        });
+      });
+      if (dernier && typeof c1 === "number" && !isNaN(c1) && Math.abs(dernier.fin - c1) > 0.5) {
+        avertir("Le compteur début (" + c1 + ") ne reprend pas le dernier compteur fin de cet onglet (" + dernier.fin + ").");
+      }
+    }
+  }
+
+  if (mode === "heures") {
+    var du2 = nombreChamp(p.duree);
+    if (estVide(du2) || isNaN(du2) || du2 <= 0) bloquer("La durée n'est pas valide.");
+    else {
+      if (du2 > 12) avertir("Durée de " + du2 + " h en une seule saisie : est-ce bien exact ?");
+      var sheetH = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HEURES_SHEET);
+      var nom = personneCanonique(p.nom) || p.nom;
+      if (sheetH && dateIsoValide(p.date)) {
+        var total = 0, doublon = false;
+        lignesHeures(sheetH).forEach(function (L) {
+          if (!(L.v[0] instanceof Date) || isoDate(L.v[0]) !== p.date) return;
+          if (normTxt(L.v[1]) !== normTxt(nom)) return;
+          total += Number(L.v[4]) || 0;
+          if (normTxt(L.v[2]) === normTxt(p.lieu) && normTxt(L.v[3]) === normTxt(p.tache)) doublon = true;
+        });
+        if (doublon) avertir(nom + " a déjà une saisie pour le même lieu et la même tâche ce jour-là.");
+        if (total + du2 > 12) avertir(nom + " aurait " + (Math.round((total + du2) * 100) / 100) + " h ce jour-là (" + total + " h déjà saisies).");
+      }
+    }
+  }
+
+  if (mode === "recolteVolume") {
+    var g = nombreChamp(p.poids);
+    if (estVide(g) || isNaN(g) || g <= 0) bloquer("Le poids n'est pas valide.");
+    else if (g > 10000) avertir("Poids de " + g + " g : est-ce bien exact ?");
+    var info = infosOngletVolume(false), key = cleParcelleLabel(p.parcelle);
+    if (info && !info.error && key && info.groups[key] && info.groups[key][p.type] && dateIsoValide(p.date)) {
+      var col = info.groups[key][p.type];
+      lireBlocBorne(info.sheet, info.startRow, 1, info.dernierCol, NB_MAX_LIGNES).forEach(function (row) {
+        if (row[info.dateCol - 1] instanceof Date && isoDate(row[info.dateCol - 1]) === p.date && typeof row[col - 1] === "number" && row[col - 1] > 0) {
+          avertir("Il y a déjà " + poidsEnGrammes(info, col, row[col - 1]) + " g de ce type pour cette parcelle ce jour-là : le poids saisi va s'ajouter.");
+        }
+      });
+    }
+  }
+
+  if (mode === "vente") {
+    (p.lignes || []).forEach(function (l) {
+      if (Number(l.prix) > 3000) avertir("Prix de " + l.prix + " €/kg pour « " + l.qualite + " » : est-ce bien exact ?");
+      if (Number(l.poids) > 5000) avertir("Poids de " + l.poids + " g pour « " + l.qualite + " » : est-ce bien exact ?");
+    });
+    var infoV = infosOngletVente(false);
+    if (infoV && !infoV.error && infoV.clientCol && dateIsoValide(p.date)) {
+      var cl = canonDans(infoV.listCol ? lireListeClients(infoV) : [], p.client);
+      lignesVente(infoV).forEach(function (L) {
+        if (L.v[0] instanceof Date && isoDate(L.v[0]) === p.date && normTxt(L.v[infoV.clientCol - 1]) === normTxt(cl)) {
+          avertir("Une vente existe déjà ce jour-là pour " + (cl || "ce client (sans nom)") + " : les poids vont s'additionner sur la même ligne.");
+        }
+      });
+    }
+  }
+  return res;
 }

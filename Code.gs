@@ -165,6 +165,7 @@ function doGet(e) {
   var actionsSaisies = {
     controle: function () { return controlerSaisie(JSON.parse(e.parameter.p || "{}")); },
     saisies: function () { return obtenirSaisies(e.parameter.module); },
+    analyse: function () { return obtenirAnalyse(); },
     saisieModifier: function () { return modifierSaisie(e.parameter.id, JSON.parse(e.parameter.p || "{}")); },
     saisieSupprimer: function () { return supprimerSaisie(e.parameter.id); }
   };
@@ -3059,4 +3060,136 @@ function controlerSaisie(p) {
     }
   }
   return res;
+}
+
+/* ================================================================
+   ANALYSE — « 📈 Bilan » : stock, eau, rendement, ventes, heures (lecture seule)
+   ================================================================ */
+
+function surfaceDuBloc(sheet, block) {
+  var ref = cellSurfaceBloc(sheet, block);
+  if (!ref) return 0;
+  var v = sheet.getRange(parseInt(ref.split("$")[2], 10), block.blockCol).getValue();
+  return typeof v === "number" && isFinite(v) ? v : 0;
+}
+
+function cleVolumeDuBloc(onglet, ligne) {
+  var t = normTxt(onglet);
+  if (/fontaine/.test(t)) return "fontaine";
+  if (/baume/.test(t)) return "baume";
+  if (/pilles/.test(t)) return "pilles";
+  if (/bousquet/.test(t)) return Number(ligne) === 2 ? "riou" : "bousquet";
+  return null;
+}
+
+function analyseEau() {
+  var bilans = obtenirTousLesBilans(), blocs = blocsIrrigation(), surf = {}, derArro = {};
+  var auj = parseDateOnly(isoDate(new Date())), derPluie = null, pluie30 = 0;
+  blocs.forEach(function (B, i) {
+    surf[B.onglet + "|" + B.ligne] = surfaceDuBloc(B.sheet, B.block);
+    var dA = null;
+    lignesBloc(B).forEach(function (L) {
+      var v = L.v;
+      if (!(v[0] instanceof Date)) return;
+      if (typeof v[7] === "number" && v[7] > 0) { if (!dA || v[0] > dA) dA = v[0]; }
+      if (i === 0 && typeof v[9] === "number" && estVide(v[7]) && v[9] > 0) {
+        if (!derPluie || v[0] > derPluie) derPluie = v[0];
+        var diff = Math.round((auj.getTime() - parseDateOnly(isoDate(v[0])).getTime()) / 86400000);
+        if (diff >= 0 && diff <= 30) pluie30 += v[9];
+      }
+    });
+    derArro[B.onglet + "|" + B.ligne] = dA ? isoDate(dA) : "";
+  });
+  var lignes = bilans.map(function (b) {
+    var tot = null;
+    b.mois.forEach(function (m) { if (m.total && !tot) tot = m; });
+    if (!tot) {
+      tot = { pluie: 0, arrosage: 0, cumul: 0, besoins: 0 };
+      b.mois.slice(0, 5).forEach(function (m) { tot.pluie += m.pluie; tot.arrosage += m.arrosage; tot.cumul += m.cumul; tot.besoins += m.besoins; });
+    }
+    var k = b.onglet + "|" + b.ligne;
+    return {
+      cle: cleVolumeDuBloc(b.onglet, b.ligne), onglet: b.onglet, label: b.onglet === "Bousquet et Riou" ? b.label : (b.onglet + " · " + b.label.replace(/ ·.*$/, "")),
+      surface: surf[k] || 0, pluie: tot.pluie, arrosage: tot.arrosage, cumul: tot.cumul, besoins: tot.besoins,
+      taux: tot.besoins > 0 ? tot.cumul / tot.besoins : null, dernierArrosage: derArro[k] || ""
+    };
+  });
+  return {
+    lignes: lignes,
+    joursDepuisPluie: derPluie ? Math.round((auj.getTime() - parseDateOnly(isoDate(derPluie)).getTime()) / 86400000) : null,
+    pluie30: Math.round(pluie30 * 10) / 10
+  };
+}
+
+function analyseRecolte(eau) {
+  var info = infosOngletVolume(false), res = { parcelles: [], recolte: 0, net: 0, brut: 0, lave: 0, perte: null, truffes: 0, brumales: 0, calibres: {} };
+  var surfCle = {};
+  eau.lignes.forEach(function (l) { if (l.cle) surfCle[l.cle] = (surfCle[l.cle] || 0) + l.surface; });
+  if (info) {
+    var t = lireTableauPoids(info);
+    res.net = t.totalNet; res.brut = t.totalBrut; res.lave = t.totalLave; res.perte = t.perte;
+    // « Récolté » = pour chaque date, le plus grand de brut / lavé / net (selon ce qui a été saisi).
+    var recolteCle = {}, recolteTotal = 0;
+    t.rows.forEach(function (r) {
+      Object.keys(r.v).forEach(function (k) {
+        var o = r.v[k], m = Math.max(o.brut || 0, o.lave || 0, o.net || 0);
+        recolteCle[k] = (recolteCle[k] || 0) + m; recolteTotal += m;
+      });
+    });
+    res.recolte = recolteTotal;
+    t.parcelles.forEach(function (p) {
+      var tt = t.totaux[p.key], base = recolteCle[p.key] || 0;
+      var ha = surfCle[p.key] || 0;
+      res.parcelles.push({ key: p.key, label: p.label, brut: tt.brut, lave: tt.lave, net: tt.net, base: base, surface: Math.round(ha * 100) / 100,
+        kgHa: ha > 0 ? Math.round(base / ha) / 1000 : null, truffes: 0, brumales: 0 });
+    });
+  }
+  var sp = ongletPointage(SpreadsheetApp.getActiveSpreadsheet());
+  if (sp) {
+    lignesPointage(sp).forEach(function (L) {
+      var v = L.v, k = cleParcelleTexte(v[2]), poids = v[3], com = v[RECOLTE_COL_COMMENT - 1] || "";
+      var brum = poids === "Brumale" || /brumale/i.test(String(com));
+      res.truffes++; if (brum) res.brumales++;
+      res.calibres[poids] = (res.calibres[poids] || 0) + 1;
+      res.parcelles.forEach(function (p) { if (p.key === k) { p.truffes++; if (brum) p.brumales++; } });
+    });
+  }
+  return res;
+}
+
+function analyseVentes() {
+  var info = infosOngletVente(false);
+  var out = { euros: 0, g: 0, prixMoyen: null, clients: [], qualites: [] };
+  if (!info) return out;
+  var t = lireTableauVente(info), cl = {};
+  out.euros = Math.round(t.totaux.euros * 100) / 100; out.g = t.totaux.g; out.prixMoyen = t.totaux.moyenne;
+  t.qualites.forEach(function (q) {
+    var h = t.totaux.q[q.key] || {};
+    if (h.total) out.qualites.push({ label: q.label, g: h.total, prix: h.moyenne });
+  });
+  t.rows.forEach(function (r) {
+    var c = r.client || "(sans nom)";
+    if (!cl[c]) cl[c] = { client: c, euros: 0, g: 0, ventes: 0 };
+    cl[c].euros += r.euros; cl[c].g += r.g; cl[c].ventes++;
+  });
+  out.clients = Object.keys(cl).map(function (k) { cl[k].euros = Math.round(cl[k].euros * 100) / 100; return cl[k]; })
+    .sort(function (a, b) { return b.euros - a.euros; });
+  out.nbVentes = t.rows.length;
+  return out;
+}
+
+function analyseHeures() {
+  var b = obtenirBilanHeures(), total = 0;
+  b.parPersonne.forEach(function (x) { total += x.total; });
+  return { total: Math.round(total * 100) / 100, parTache: b.parTache.slice(0, 6), parPersonne: b.parPersonne, parLieu: b.parLieu.slice(0, 6) };
+}
+
+function obtenirAnalyse() {
+  var eau = analyseEau(), rec = analyseRecolte(eau), ven = analyseVentes(), h = analyseHeures();
+  var stock = rec.net - ven.g;
+  return {
+    maj: Utilities.formatDate(new Date(), fuseauClasseur(), "dd/MM/yyyy HH:mm"),
+    stock: { net: rec.net, vendu: ven.g, stock: stock, brut: rec.brut, lave: rec.lave, perte: rec.perte, negatif: stock < 0 },
+    eau: eau, recolte: rec, ventes: ven, heures: h
+  };
 }

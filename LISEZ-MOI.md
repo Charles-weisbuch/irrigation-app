@@ -159,3 +159,7 @@ Le plus simple, vu que tu utilises déjà GitHub : crée un nouveau dépôt, ajo
 1. Apps Script : remplacer tout `Code.gs`, puis Déployer > Gérer les déploiements > Modifier > Nouvelle version.
 2. Lancer une fois `colorerBrumale` (règle rose étendue au commentaire).
 3. GitHub Desktop : remplacer `index.html` et `sw.js` (cache v9), commit + push, puis Ctrl+Maj+R.
+
+## 📈 Bilan (nouveau)
+Bouton « 📈 Bilan » en haut de l'accueil : stock de truffes (net récolté − vendu), eau par ligne (pluie + arrosage ÷ besoins, mai–septembre), rendement par parcelle (kg/ha), ventes (CA, prix moyen, clients) et heures. Lecture seule, calculé depuis le fichier ; « Actualiser » en bas.
+Déploiement : coller le nouveau `Code.gs` + nouvelle version, remplacer `index.html` et `sw.js` (cache v10).
